@@ -1,0 +1,76 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-ink-950: #0a0c10;
+  --color-ink-900: #11151c;
+  --color-ink-850: #161b24;
+  --color-ink-800: #1c2330;
+  --color-ink-700: #2a3344;
+  --color-ink-600: #3d4a5f;
+  --color-ink-400: #8b98ad;
+  --color-ink-300: #b4bfce;
+  --color-accent: #3ecfbf;
+  --color-accent-dim: rgba(62, 207, 191, 0.12);
+  --color-warn: #e8b86d;
+  --color-danger: #f07178;
+  --color-ok: #7fd99a;
+}
+
+body {
+  @apply overflow-x-hidden font-sans antialiased;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(62, 207, 191, 0.07), transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, rgba(232, 184, 109, 0.05), transparent 50%),
+    #0a0c10;
+  color: #c5cedb;
+}
+
+.panel {
+  @apply rounded-2xl border border-white/[0.06] bg-ink-900/80 backdrop-blur-sm;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+
+.panel-soft {
+  @apply rounded-xl border border-white/[0.05] bg-ink-850/70;
+}
+
+.metric-label {
+  @apply text-[10px] font-medium uppercase tracking-[0.16em] text-ink-400;
+}
+
+.kpi-chip {
+  @apply flex flex-col gap-0.5 rounded-xl border border-white/[0.06] bg-ink-950/50 px-3 py-1.5 min-w-[88px];
+}
+
+.seg-btn {
+  @apply text-[10px] px-2.5 py-1 rounded-lg border font-semibold tracking-wide transition-all;
+}
+
+.seg-btn-on {
+  @apply border-accent/40 bg-accent-dim text-accent;
+}
+
+.seg-btn-off {
+  @apply border-white/[0.06] text-ink-400 hover:text-ink-300 hover:border-white/10;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(139, 152, 173, 0.35);
+  border-radius: 999px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-line::before {
+  content: "$";
+  @apply mr-2 text-ink-400;
+}

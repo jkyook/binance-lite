@@ -1,0 +1,20 @@
+[Unit]
+Description=Binance Lite (Node Express)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/binance-lite
+Environment=NODE_ENV=production
+Environment=LISTEN_HOST=0.0.0.0
+Environment=PORT=3000
+EnvironmentFile=-/home/ubuntu/binance-lite/.env
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+# Soft limit — avoid runaway REST if something loops
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

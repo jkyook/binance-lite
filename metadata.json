@@ -1,0 +1,6 @@
+{
+  "name": "Binance AI Dashboard",
+  "description": "Real-time Binance Spot & Futures dashboard with AI insights, position tracking, and uPNL monitoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
