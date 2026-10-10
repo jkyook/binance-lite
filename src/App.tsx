@@ -1936,7 +1936,6 @@ export default function App() {
                 )}
               </div>
             </div>
-          </div>
             <div className="kpi-chip">
               <span className="metric-label">Notional</span>
               <span className="text-sm font-mono text-white tabular-nums">${formatUsdCompact(totalExposure)}</span>
