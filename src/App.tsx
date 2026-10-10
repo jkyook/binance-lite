@@ -1961,7 +1961,7 @@ export default function App() {
               </div>
             </div>
             <div className="kpi-chip">
-              <span className="metric-label">Notional</span>
+              <span className="metric-label">Position</span>
               <KpiDualMoney usd={totalExposure} rate={usdKrwRate} />
             </div>
             <div
@@ -1970,7 +1970,7 @@ export default function App() {
               onClick={() => setWalletAssetsOpen((o) => !o)}
               title={walletAssetsOpen ? '클릭하면 닫기' : '클릭하면 담보 내역 고정'}
             >
-              <span className="metric-label">Wallet</span>
+              <span className="metric-label">Collateral</span>
               <KpiDualMoney usd={parseFloat(accountBalance) || 0} rate={usdKrwRate} />
               <div
                 className={`absolute left-0 top-full z-[60] mt-1.5 w-[280px] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
