@@ -1771,119 +1771,25 @@ export default function App() {
           </div>
 
           <div className="px-4 lg:px-6 pb-3 flex flex-wrap gap-2">
-            <div className="kpi-chip">
-              <span className="metric-label">Notional</span>
-              <span className="text-sm font-mono text-white tabular-nums">${formatUsdCompact(totalExposure)}</span>
+            <div
+              className="kpi-chip"
+              title={`전체노출 = 포지션 $${formatUsdCompact(totalExposure)} + 지갑(선물·현물·Earn 등) $${formatUsdCompact(allWalletsUsdtForExposed)}${allWalletsOverview ? '' : ' (USD-M만, 전체지갑 대기)'}`}
+            >
+              <span className="metric-label">Exposed</span>
+              <span className="text-sm font-mono text-white tabular-nums">
+                ${formatUsdCompact(totalValuationPlusWallet)}
+              </span>
+              {usdKrwRate ? (
+                <span className="text-[10px] font-mono text-ink-400 tabular-nums">
+                  ₩{formatUsdCompact(totalValuationPlusWallet * usdKrwRate)}
+                </span>
+              ) : null}
             </div>
             <div className="kpi-chip">
               <span className="metric-label">uPNL</span>
               <span className={`text-sm font-mono tabular-nums ${totalUPNL >= 0 ? 'text-ok' : 'text-danger'}`}>
                 {totalUPNL >= 0 ? '+' : ''}{formatUsdCompact(totalUPNL)}
               </span>
-            </div>
-            <div className="kpi-chip">
-              <span className="metric-label">Margin</span>
-              <span className="text-sm font-mono text-accent tabular-nums">
-                {formatUsdCompact(accountInfo?.totalMarginBalance || 0)}
-              </span>
-            </div>
-            <div
-              ref={walletChipRef}
-              className={`kpi-chip relative group cursor-pointer select-none ${walletAssetsOpen ? 'border-accent/40' : ''}`}
-              onClick={() => setWalletAssetsOpen((o) => !o)}
-              title={walletAssetsOpen ? '클릭하면 닫기' : '클릭하면 담보 내역 고정'}
-            >
-              <span className="metric-label">Wallet</span>
-              <span className="text-sm font-mono text-white tabular-nums">{formatUsdCompact(accountBalance)}</span>
-              <div
-                className={`absolute left-0 top-full z-[60] mt-1.5 w-[280px] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
-                  walletAssetsOpen
-                    ? 'block pointer-events-auto'
-                    : 'hidden pointer-events-none group-hover:block'
-                }`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">담보 자산</span>
-                  {walletAssetsOpen && (
-                    <button
-                      type="button"
-                      className="text-[10px] text-ink-500 hover:text-white"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setWalletAssetsOpen(false);
-                      }}
-                    >
-                      닫기
-                    </button>
-                  )}
-                </div>
-                {walletCollateralRows.length === 0 ? (
-                  <div className="text-[11px] text-ink-500 py-2">자산 없음</div>
-                ) : (
-                  <>
-                    <div className="mb-1 grid grid-cols-[1fr_auto_auto] gap-x-2 px-0.5 text-[9px] uppercase tracking-wider text-ink-600">
-                      <span>Asset</span>
-                      <span className="text-right">Qty</span>
-                      <span className="text-right w-[72px]">USDT</span>
-                    </div>
-                    <ul className="space-y-1 max-h-[min(320px,50vh)] overflow-y-auto custom-scrollbar overscroll-contain">
-                      {walletCollateralRows.map((row) => {
-                        const qtyText = row.stable
-                          ? formatUsdCompact(row.qty)
-                          : Math.abs(row.qty) >= 1
-                            ? row.qty.toLocaleString(undefined, { maximumFractionDigits: 4 })
-                            : row.qty.toPrecision(4);
-                        return (
-                          <li
-                            key={row.asset}
-                            className="grid grid-cols-[1fr_auto_auto] gap-x-2 items-center text-[11px] font-mono border-b border-white/[0.04] last:border-0 py-1"
-                          >
-                            <span className="text-ink-300 truncate">
-                              {row.asset}
-                              {row.stable && <span className="ml-1 text-[9px] text-ink-600">stable</span>}
-                            </span>
-                            <span className={`tabular-nums text-right ${row.qty >= 0 ? 'text-white' : 'text-danger'}`}>
-                              {qtyText}
-                            </span>
-                            <span className={`tabular-nums text-right w-[72px] ${row.usdt >= 0 ? 'text-accent' : 'text-danger'}`}>
-                              ${formatUsdCompact(row.usdt)}
-                            </span>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </>
-                )}
-                <div className="mt-1.5 pt-1.5 border-t border-white/[0.06] space-y-0.5 text-[10px] font-mono text-ink-400">
-                  <div className="flex justify-between gap-2">
-                    <span>시가평가 합</span>
-                    <span className="text-accent tabular-nums">${formatUsdCompact(walletCollateralUsdtSum)}</span>
-                  </div>
-                  <div className="flex justify-between gap-2">
-                    <span>Wallet(바이낸스)</span>
-                    <span className="text-white tabular-nums">${formatUsdCompact(accountBalance)}</span>
-                  </div>
-                  <p className="text-[9px] text-ink-600 leading-snug pt-0.5">
-                    비Stable = 수량×마크. Wallet 합은 담보할인 반영값이라 시가합과 다를 수 있음.
-                  </p>
-                </div>
-              </div>
-            </div>
-            {usdKrwRate && (
-              <div
-                className="kpi-chip"
-                title={`포지션 $${formatUsdCompact(totalExposure)} + 전체지갑 $${formatUsdCompact(allWalletsUsdtForExposed)}${allWalletsOverview ? '' : ' (USD-M만, 전체지갑 대기)'}`}
-              >
-                <span className="metric-label">₩ Exposed</span>
-                <span className="text-sm font-mono text-ink-300 tabular-nums">
-                  {formatUsdCompact(totalValuationPlusWallet * usdKrwRate)}
-                </span>
-              </div>
-            )}
-            <div className="kpi-chip hidden sm:flex">
-              <span className="metric-label">Pos / Ord</span>
-              <span className="text-sm font-mono text-white tabular-nums">{positions.length} / {openOrders.length}</span>
             </div>
             <div
               ref={allWalletsChipRef}
@@ -2029,6 +1935,104 @@ export default function App() {
                   <p className="mt-1 text-[9px] text-danger leading-snug">{allWalletsError}</p>
                 )}
               </div>
+            </div>
+          </div>
+            <div className="kpi-chip">
+              <span className="metric-label">Notional</span>
+              <span className="text-sm font-mono text-white tabular-nums">${formatUsdCompact(totalExposure)}</span>
+            </div>
+            <div
+              ref={walletChipRef}
+              className={`kpi-chip relative group cursor-pointer select-none ${walletAssetsOpen ? 'border-accent/40' : ''}`}
+              onClick={() => setWalletAssetsOpen((o) => !o)}
+              title={walletAssetsOpen ? '클릭하면 닫기' : '클릭하면 담보 내역 고정'}
+            >
+              <span className="metric-label">Wallet</span>
+              <span className="text-sm font-mono text-white tabular-nums">{formatUsdCompact(accountBalance)}</span>
+              <div
+                className={`absolute left-0 top-full z-[60] mt-1.5 w-[280px] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
+                  walletAssetsOpen
+                    ? 'block pointer-events-auto'
+                    : 'hidden pointer-events-none group-hover:block'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">담보 자산</span>
+                  {walletAssetsOpen && (
+                    <button
+                      type="button"
+                      className="text-[10px] text-ink-500 hover:text-white"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setWalletAssetsOpen(false);
+                      }}
+                    >
+                      닫기
+                    </button>
+                  )}
+                </div>
+                {walletCollateralRows.length === 0 ? (
+                  <div className="text-[11px] text-ink-500 py-2">자산 없음</div>
+                ) : (
+                  <>
+                    <div className="mb-1 grid grid-cols-[1fr_auto_auto] gap-x-2 px-0.5 text-[9px] uppercase tracking-wider text-ink-600">
+                      <span>Asset</span>
+                      <span className="text-right">Qty</span>
+                      <span className="text-right w-[72px]">USDT</span>
+                    </div>
+                    <ul className="space-y-1 max-h-[min(320px,50vh)] overflow-y-auto custom-scrollbar overscroll-contain">
+                      {walletCollateralRows.map((row) => {
+                        const qtyText = row.stable
+                          ? formatUsdCompact(row.qty)
+                          : Math.abs(row.qty) >= 1
+                            ? row.qty.toLocaleString(undefined, { maximumFractionDigits: 4 })
+                            : row.qty.toPrecision(4);
+                        return (
+                          <li
+                            key={row.asset}
+                            className="grid grid-cols-[1fr_auto_auto] gap-x-2 items-center text-[11px] font-mono border-b border-white/[0.04] last:border-0 py-1"
+                          >
+                            <span className="text-ink-300 truncate">
+                              {row.asset}
+                              {row.stable && <span className="ml-1 text-[9px] text-ink-600">stable</span>}
+                            </span>
+                            <span className={`tabular-nums text-right ${row.qty >= 0 ? 'text-white' : 'text-danger'}`}>
+                              {qtyText}
+                            </span>
+                            <span className={`tabular-nums text-right w-[72px] ${row.usdt >= 0 ? 'text-accent' : 'text-danger'}`}>
+                              ${formatUsdCompact(row.usdt)}
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
+                )}
+                <div className="mt-1.5 pt-1.5 border-t border-white/[0.06] space-y-0.5 text-[10px] font-mono text-ink-400">
+                  <div className="flex justify-between gap-2">
+                    <span>시가평가 합</span>
+                    <span className="text-accent tabular-nums">${formatUsdCompact(walletCollateralUsdtSum)}</span>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span>Wallet(바이낸스)</span>
+                    <span className="text-white tabular-nums">${formatUsdCompact(accountBalance)}</span>
+                  </div>
+                  <p className="text-[9px] text-ink-600 leading-snug pt-0.5">
+                    비Stable = 수량×마크. Wallet 합은 담보할인 반영값이라 시가합과 다를 수 있음.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="kpi-chip">
+              <span className="metric-label">Margin</span>
+              <span className="text-sm font-mono text-accent tabular-nums">
+                {formatUsdCompact(accountInfo?.totalMarginBalance || 0)}
+              </span>
+            </div>
+            <div className="kpi-chip hidden sm:flex">
+              <span className="metric-label">Pos / Ord</span>
+              <span className="text-sm font-mono text-white tabular-nums">{positions.length} / {openOrders.length}</span>
             </div>
           </div>
 
