@@ -77,6 +77,34 @@ const formatUsdCompact = (raw: string | number) => {
   return Math.round(v).toLocaleString();
 };
 
+/** KPI: 위 USD, 아래 KRW */
+const KpiDualMoney = ({
+  usd,
+  rate,
+  signed,
+  valueClassName = 'text-white',
+}: {
+  usd: number;
+  rate: number | null;
+  signed?: boolean;
+  valueClassName?: string;
+}) => {
+  const n = Number.isFinite(usd) ? usd : 0;
+  const sign = signed && n >= 0 ? '+' : '';
+  return (
+    <div className="flex flex-col gap-0.5 leading-tight">
+      <span className={`text-sm font-mono tabular-nums ${valueClassName}`}>
+        {sign}${formatUsdCompact(n)}
+      </span>
+      {rate != null && Number.isFinite(rate) ? (
+        <span className={`text-[10px] font-mono tabular-nums text-ink-400 ${signed ? (n >= 0 ? 'text-ok/70' : 'text-danger/70') : ''}`}>
+          {sign}₩{formatUsdCompact(n * rate)}
+        </span>
+      ) : null}
+    </div>
+  );
+};
+
 const isRateLimitError = (msg?: string | null) =>
   !!msg && /ip ban|banned until|rate limit|418|-1003|too many requests/i.test(msg);
 
@@ -1776,20 +1804,16 @@ export default function App() {
               title={`전체노출 = 포지션 $${formatUsdCompact(totalExposure)} + 지갑(선물·현물·Earn 등) $${formatUsdCompact(allWalletsUsdtForExposed)}${allWalletsOverview ? '' : ' (USD-M만, 전체지갑 대기)'}`}
             >
               <span className="metric-label">Exposed</span>
-              <span className="text-sm font-mono text-white tabular-nums">
-                ${formatUsdCompact(totalValuationPlusWallet)}
-              </span>
-              {usdKrwRate ? (
-                <span className="text-[10px] font-mono text-ink-400 tabular-nums">
-                  ₩{formatUsdCompact(totalValuationPlusWallet * usdKrwRate)}
-                </span>
-              ) : null}
+              <KpiDualMoney usd={totalValuationPlusWallet} rate={usdKrwRate} />
             </div>
             <div className="kpi-chip">
               <span className="metric-label">uPNL</span>
-              <span className={`text-sm font-mono tabular-nums ${totalUPNL >= 0 ? 'text-ok' : 'text-danger'}`}>
-                {totalUPNL >= 0 ? '+' : ''}{formatUsdCompact(totalUPNL)}
-              </span>
+              <KpiDualMoney
+                usd={totalUPNL}
+                rate={usdKrwRate}
+                signed
+                valueClassName={totalUPNL >= 0 ? 'text-ok' : 'text-danger'}
+              />
             </div>
             <div
               ref={allWalletsChipRef}
@@ -1808,13 +1832,13 @@ export default function App() {
               title={allWalletsOpen ? '클릭하면 닫기' : 'Spot·Earn·Funding 등 전체 지갑'}
             >
               <span className="metric-label">All Wallets</span>
-              <span className="text-sm font-mono text-white tabular-nums">
-                {allWalletsOverview
-                  ? `$${formatUsdCompact(allWalletsOverview.totalUsdt)}`
-                  : allWalletsError
-                    ? '—'
-                    : '…'}
-              </span>
+              {allWalletsOverview ? (
+                <KpiDualMoney usd={allWalletsOverview.totalUsdt} rate={usdKrwRate} />
+              ) : (
+                <span className="text-sm font-mono text-white tabular-nums">
+                  {allWalletsError ? '—' : '…'}
+                </span>
+              )}
               <div
                 className={`absolute right-0 top-full z-[60] mt-1.5 w-[min(340px,calc(100vw-2rem))] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
                   allWalletsOpen ? 'block pointer-events-auto' : 'hidden pointer-events-none group-hover:block'
@@ -1938,7 +1962,7 @@ export default function App() {
             </div>
             <div className="kpi-chip">
               <span className="metric-label">Notional</span>
-              <span className="text-sm font-mono text-white tabular-nums">${formatUsdCompact(totalExposure)}</span>
+              <KpiDualMoney usd={totalExposure} rate={usdKrwRate} />
             </div>
             <div
               ref={walletChipRef}
@@ -1947,7 +1971,7 @@ export default function App() {
               title={walletAssetsOpen ? '클릭하면 닫기' : '클릭하면 담보 내역 고정'}
             >
               <span className="metric-label">Wallet</span>
-              <span className="text-sm font-mono text-white tabular-nums">{formatUsdCompact(accountBalance)}</span>
+              <KpiDualMoney usd={parseFloat(accountBalance) || 0} rate={usdKrwRate} />
               <div
                 className={`absolute left-0 top-full z-[60] mt-1.5 w-[280px] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
                   walletAssetsOpen
@@ -2025,9 +2049,11 @@ export default function App() {
             </div>
             <div className="kpi-chip">
               <span className="metric-label">Margin</span>
-              <span className="text-sm font-mono text-accent tabular-nums">
-                {formatUsdCompact(accountInfo?.totalMarginBalance || 0)}
-              </span>
+              <KpiDualMoney
+                usd={parseFloat(accountInfo?.totalMarginBalance || '0') || 0}
+                rate={usdKrwRate}
+                valueClassName="text-accent"
+              />
             </div>
             <div className="kpi-chip hidden sm:flex">
               <span className="metric-label">Pos / Ord</span>
