@@ -77,6 +77,14 @@ const formatUsdCompact = (raw: string | number) => {
   return Math.round(v).toLocaleString();
 };
 
+const formatTickerPrice = (raw?: string | number | null) => {
+  const v = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
+  if (!Number.isFinite(v) || v <= 0) return null;
+  const abs = Math.abs(v);
+  const digits = abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
+  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: digits });
+};
+
 /** KPI: 위 USD, 아래 KRW */
 const KpiDualMoney = ({
   usd,
@@ -795,9 +803,12 @@ export default function App() {
     let cancelled = false;
 
     const pollActivePrice = async () => {
-      const price = await BinanceService.getPrice(activeSymbol);
-      if (cancelled || !price || price === '0') return;
-      applyLiveTickerUpdate(activeSymbol, { symbol: activeSymbol, price });
+      const symbols = Array.from(new Set([activeSymbol, 'BTCUSDT']));
+      await Promise.all(symbols.map(async (symbol) => {
+        const price = await BinanceService.getPrice(symbol);
+        if (cancelled || !price || price === '0') return;
+        applyLiveTickerUpdate(symbol, { symbol, price });
+      }));
     };
 
     pollActivePrice();
@@ -808,6 +819,13 @@ export default function App() {
       clearInterval(interval);
     };
   }, [activeSymbol]);
+
+  // Browser tab ticker — Binance-style live BTC last price in the document title
+  const btcLastPrice = stats['BTCUSDT']?.price;
+  useEffect(() => {
+    const formatted = formatTickerPrice(btcLastPrice);
+    document.title = formatted ? `${formatted} | BTCUSDT | Binance Lite` : 'Binance Lite';
+  }, [btcLastPrice]);
 
   // 2. Initial Data Fetching
   useEffect(() => {
@@ -1729,7 +1747,7 @@ export default function App() {
 
       <main className="flex-1 flex flex-col overflow-hidden min-w-0">
         <header className="border-b border-white/[0.06] bg-ink-950/40 backdrop-blur-md sticky top-0 z-40">
-          <div className="h-[56px] flex items-center gap-3 px-4 lg:px-6">
+          <div className="min-h-[56px] flex items-center gap-3 px-4 lg:px-6 py-1">
             <div className="hidden xl:flex items-center gap-2 shrink-0">
               <span className="text-ink-400 font-mono text-[11px]">/{activeSymbol}</span>
             </div>
@@ -1737,6 +1755,7 @@ export default function App() {
             <div className="flex-1 flex justify-center gap-1 overflow-x-auto custom-scrollbar min-w-0">
               {SYMBOLS.map(symbol => {
                 const ch = parseFloat(stats[symbol]?.change24h || '0');
+                const tickerPrice = formatTickerPrice(stats[symbol]?.price);
                 return (
                   <button
                     key={symbol}
@@ -1745,10 +1764,13 @@ export default function App() {
                       activeSymbol === symbol ? 'bg-accent-dim border-accent/35' : 'border-transparent opacity-55 hover:opacity-100'
                     }`}
                   >
-                    <div className="flex flex-col min-w-[40px] items-start">
+                    <div className="flex flex-col min-w-[72px] items-start leading-tight">
                       <span className="text-[10px] font-semibold text-white">{symbol.replace(/USDT|USDC/g, '')}</span>
-                      <span className={`text-[10px] font-mono ${ch >= 0 ? 'text-ok' : 'text-danger'}`}>
-                        {stats[symbol]?.change24h != null ? formatPct(stats[symbol].change24h) : '…'}
+                      <span className={`text-[10px] font-mono tabular-nums ${ch >= 0 ? 'text-ok' : 'text-danger'}`}>
+                        {tickerPrice ? `$${tickerPrice}` : '…'}
+                        <span className="ml-1 opacity-80">
+                          {stats[symbol]?.change24h != null ? formatPct(stats[symbol].change24h) : ''}
+                        </span>
                       </span>
                     </div>
                   </button>
