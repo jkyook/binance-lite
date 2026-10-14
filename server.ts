@@ -158,6 +158,8 @@ let walletDetailsCache: { at: number; data: any } | null = null;
 const WALLET_OVERVIEW_CACHE_MS = 180_000; // 3분
 const WALLET_DETAILS_CACHE_MS = 180_000;
 const WALLET_DETAIL_GAP_MS = 450; // 상세 API 사이 간격 (IP 제한 완화)
+let trades24hCache: { at: number; data: any } | null = null;
+const TRADES_24H_CACHE_MS = 120_000; // 2분 — userTrades 심볼 순차 호출 보호
 
 const DEFAULT_JUPITER_WALLET = "8nX7ULNGGapgbYrJzFsgKyPYog8jXtKREcWEMyvSjZG9";
 const JUPITER_WALLET = (process.env.JUPITER_WALLET || DEFAULT_JUPITER_WALLET).trim();
@@ -744,6 +746,145 @@ async function startServer() {
       const data = await binanceRequest("/fapi/v1/userTrades", "GET", params);
       res.json(data);
     } catch (err: any) {
+      sendApiError(res, err);
+    }
+  });
+
+  /** 지난 24시간 선물 체결 매수/매도 합계 — 심볼 순차 조회, 2분 캐시 */
+  apiRouter.get("/futures/trades-24h", async (req, res) => {
+    try {
+      const force = String(req.query.refresh || "") === "1";
+      if (!force && trades24hCache && Date.now() - trades24hCache.at < TRADES_24H_CACHE_MS) {
+        res.json({ ...trades24hCache.data, cached: true });
+        return;
+      }
+
+      const endTime = Date.now();
+      const startTime = endTime - 24 * 60 * 60 * 1000;
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+      const collectIncomeSymbols = async (incomeType: string) => {
+        const found = new Set<string>();
+        let windowStart = startTime;
+        let windowEnd = endTime;
+        for (let page = 0; page < 8; page++) {
+          const rows = await binanceRequest("/fapi/v1/income", "GET", {
+            incomeType,
+            startTime: String(windowStart),
+            endTime: String(windowEnd),
+            limit: "1000",
+          });
+          const list = Array.isArray(rows) ? rows : [];
+          for (const row of list) {
+            if (row?.symbol) found.add(String(row.symbol));
+          }
+          if (list.length < 1000) break;
+          const times = list.map((r: any) => Number(r.time) || 0).filter((n: number) => n > 0);
+          if (!times.length) break;
+          const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
+          if (newestFirst) {
+            windowEnd = Math.min(...times) - 1;
+          } else {
+            windowStart = Math.max(...times) + 1;
+          }
+          if (windowEnd <= windowStart) break;
+          await sleep(120);
+        }
+        return found;
+      };
+
+      const symbols = new Set<string>();
+      for (const incomeType of ["COMMISSION", "REALIZED_PNL"]) {
+        try {
+          const found = await collectIncomeSymbols(incomeType);
+          for (const s of found) symbols.add(s);
+        } catch (e: any) {
+          console.warn(`[trades-24h] income ${incomeType} failed:`, e?.message || e);
+        }
+      }
+
+      const symbolList = Array.from(symbols).filter(Boolean);
+      const mapped: Array<{
+        symbol: string;
+        id: number;
+        orderId: number;
+        side: "BUY" | "SELL";
+        price: number;
+        qty: number;
+        quoteQty: number;
+        time: number;
+        realizedPnl: number;
+      }> = [];
+      const seenTrade = new Set<string>();
+
+      for (let i = 0; i < symbolList.length; i++) {
+        const symbol = symbolList[i];
+        try {
+          let fromId: string | undefined;
+          for (let page = 0; page < 10; page++) {
+            const params: Record<string, string> = {
+              symbol,
+              startTime: String(startTime),
+              endTime: String(endTime),
+              limit: "1000",
+            };
+            if (fromId) params.fromId = fromId;
+            const raw = await binanceRequest("/fapi/v1/userTrades", "GET", params);
+            const list = Array.isArray(raw) ? raw : [];
+            for (const t of list) {
+              const id = Number(t.id) || 0;
+              const key = `${t.symbol || symbol}:${id}`;
+              if (seenTrade.has(key)) continue;
+              seenTrade.add(key);
+              const price = parseFloat(t.price || "0") || 0;
+              const qty = parseFloat(t.qty || "0") || 0;
+              const quoteQty = parseFloat(t.quoteQty || "") || price * qty;
+              const side = String(t.side || "").toUpperCase() === "SELL" ? "SELL" : "BUY";
+              mapped.push({
+                symbol: String(t.symbol || symbol),
+                id,
+                orderId: Number(t.orderId) || 0,
+                side,
+                price,
+                qty,
+                quoteQty,
+                time: Number(t.time) || 0,
+                realizedPnl: parseFloat(t.realizedPnl || "0") || 0,
+              });
+            }
+            if (list.length < 1000) break;
+            const maxId = Math.max(...list.map((t: any) => Number(t.id) || 0));
+            if (!Number.isFinite(maxId) || maxId <= 0) break;
+            fromId = String(maxId + 1);
+            await sleep(120);
+          }
+        } catch (e: any) {
+          console.warn(`[trades-24h] ${symbol} failed:`, e?.message || e);
+        }
+        if (i < symbolList.length - 1) await sleep(120);
+      }
+
+      mapped.sort((a, b) => b.time - a.time);
+      const buy = mapped.filter((t) => t.side === "BUY");
+      const sell = mapped.filter((t) => t.side === "SELL");
+      const data = {
+        startTime,
+        endTime,
+        buyUsd: buy.reduce((s, t) => s + t.quoteQty, 0),
+        sellUsd: sell.reduce((s, t) => s + t.quoteQty, 0),
+        buy,
+        sell,
+        symbols: symbolList,
+        updatedAt: Date.now(),
+        cached: false,
+      };
+      trades24hCache = { at: Date.now(), data };
+      res.json(data);
+    } catch (err: any) {
+      if (trades24hCache?.data) {
+        res.json({ ...trades24hCache.data, cached: true, staleError: err?.message });
+        return;
+      }
       sendApiError(res, err);
     }
   });

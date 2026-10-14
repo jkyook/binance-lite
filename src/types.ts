@@ -64,6 +64,31 @@ export interface FuturesTrade {
   realizedPnl: string;
   side: string;
   time: number;
+  quoteQty?: string;
+}
+
+export interface FuturesTrade24hRow {
+  symbol: string;
+  id: number;
+  orderId: number;
+  side: 'BUY' | 'SELL';
+  price: number;
+  qty: number;
+  quoteQty: number;
+  time: number;
+  realizedPnl: number;
+}
+
+export interface FuturesTrades24h {
+  startTime: number;
+  endTime: number;
+  buyUsd: number;
+  sellUsd: number;
+  buy: FuturesTrade24hRow[];
+  sell: FuturesTrade24hRow[];
+  symbols: string[];
+  updatedAt: number;
+  cached?: boolean;
 }
 
 export interface FuturesIncome {

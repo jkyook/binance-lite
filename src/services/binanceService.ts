@@ -1,4 +1,4 @@
-import { AssetStats, FuturesPosition, FuturesOrder, FuturesTrade, FuturesIncome } from '../types';
+import { AssetStats, FuturesPosition, FuturesOrder, FuturesTrade, FuturesIncome, FuturesTrades24h } from '../types';
 
 export class BinanceService {
   /**
@@ -266,6 +266,22 @@ export class BinanceService {
     if (!response.ok) {
       const errorText = await response.text();
       let errorMsg = 'Failed to fetch trades';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMsg = errorJson.error || errorJson.msg || errorMsg;
+      } catch (e) {
+        errorMsg = errorText || errorMsg;
+      }
+      throw new Error(errorMsg);
+    }
+    return response.json();
+  }
+
+  static async getFuturesTrades24h(refresh = false): Promise<FuturesTrades24h> {
+    const response = await fetch(`/api/futures/trades-24h${refresh ? '?refresh=1' : ''}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMsg = 'Failed to fetch 24h trades';
       try {
         const errorJson = JSON.parse(errorText);
         errorMsg = errorJson.error || errorJson.msg || errorMsg;

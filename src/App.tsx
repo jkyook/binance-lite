@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend } from 'recharts';
-import { AssetStats, MarketInsight, FuturesPosition, FuturesOrder, FuturesTrade, HistoricalSnapshot, FuturesIncome } from './types';
+import { AssetStats, MarketInsight, FuturesPosition, FuturesOrder, FuturesTrade, FuturesTrades24h, HistoricalSnapshot, FuturesIncome } from './types';
 import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
 
@@ -162,6 +162,14 @@ export default function App() {
   const [expandedExposedSection, setExpandedExposedSection] = useState<string | null>(null);
   const [jupiterOpen, setJupiterOpen] = useState(false);
   const jupiterChipRef = useRef<HTMLDivElement | null>(null);
+  const [trades24h, setTrades24h] = useState<FuturesTrades24h | null>(null);
+  const [trades24hOpen, setTrades24hOpen] = useState(false);
+  const [trades24hSection, setTrades24hSection] = useState<'BUY' | 'SELL' | null>(null);
+  const [trades24hLoading, setTrades24hLoading] = useState(false);
+  const [trades24hError, setTrades24hError] = useState<string | null>(null);
+  const trades24hChipRef = useRef<HTMLDivElement | null>(null);
+  const trades24hAtRef = useRef(0);
+  const TRADES_24H_GAP_MS = 120_000;
   const [jupiterPortfolio, setJupiterPortfolio] = useState<{
     address: string;
     totalUsd: number;
@@ -516,6 +524,35 @@ export default function App() {
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [allWalletsOpen]);
+
+  useEffect(() => {
+    if (!trades24hOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!trades24hChipRef.current?.contains(e.target as Node)) {
+        setTrades24hOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [trades24hOpen]);
+
+  const fetchTrades24h = async (opts?: { force?: boolean }) => {
+    const force = !!opts?.force;
+    if (!force && trades24hAtRef.current > 0 && Date.now() - trades24hAtRef.current < TRADES_24H_GAP_MS) {
+      return;
+    }
+    setTrades24hLoading(true);
+    try {
+      const data = await BinanceService.getFuturesTrades24h(force);
+      trades24hAtRef.current = Date.now();
+      setTrades24h(data);
+      setTrades24hError(null);
+    } catch (e: any) {
+      setTrades24hError(e?.message || '24h 체결 조회 실패');
+    } finally {
+      setTrades24hLoading(false);
+    }
+  };
 
   const fetchAllWalletsOverview = async (opts?: { force?: boolean }) => {
     const force = !!opts?.force;
@@ -1241,6 +1278,7 @@ export default function App() {
 
         // 전체 지갑 총액만 드물게 갱신 (상세는 클릭 시에만 — IP 제한 완화)
         void fetchAllWalletsOverview({ force: false });
+        void fetchTrades24h({ force: false });
 
         // Calculate Totals for History
         const totalUPNLVal = pos.reduce((acc, p) => acc + parseFloat(p.unRealizedProfit), 0);
@@ -2547,6 +2585,140 @@ export default function App() {
             <div className="kpi-chip hidden sm:flex">
               <span className="metric-label">Pos / Ord</span>
               <span className="text-[16.1px] font-mono text-white tabular-nums">{positions.length} / {openOrders.length}</span>
+            </div>
+            <div
+              ref={trades24hChipRef}
+              className={`kpi-chip relative group cursor-pointer select-none min-w-[118px] ${trades24hOpen ? 'border-accent/40' : ''}`}
+              onClick={() => {
+                setTrades24hOpen((o) => {
+                  const next = !o;
+                  if (next) void fetchTrades24h({ force: false });
+                  return next;
+                });
+              }}
+              title={trades24hOpen ? '클릭하면 닫기' : '지난 24시간 매수/매도 합계'}
+            >
+              <span className="metric-label">24h 매수 / 매도</span>
+              {trades24h ? (
+                <span className="text-sm font-mono tabular-nums leading-tight">
+                  <span className="text-ok">${formatUsdCompact(trades24h.buyUsd)}</span>
+                  <span className="text-ink-600"> / </span>
+                  <span className="text-danger">${formatUsdCompact(trades24h.sellUsd)}</span>
+                </span>
+              ) : (
+                <span className="text-sm font-mono text-white tabular-nums">
+                  {trades24hError ? '—' : trades24hLoading ? '…' : '…'}
+                </span>
+              )}
+              <div
+                className={`absolute right-0 top-full z-[60] mt-1.5 w-[min(360px,calc(100vw-2rem))] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
+                  trades24hOpen ? 'block pointer-events-auto' : 'hidden pointer-events-none group-hover:block'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">
+                    지난 24시간 체결
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="text-[10px] text-accent hover:underline disabled:opacity-40"
+                      disabled={trades24hLoading}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void fetchTrades24h({ force: true });
+                      }}
+                    >
+                      {trades24hLoading ? '로딩…' : '새로고침'}
+                    </button>
+                    {trades24hOpen && (
+                      <button
+                        type="button"
+                        className="text-[10px] text-ink-500 hover:text-white"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setTrades24hOpen(false);
+                        }}
+                      >
+                        닫기
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {trades24hError && !trades24h && (
+                  <div className="text-[11px] text-danger py-2 leading-snug">{trades24hError}</div>
+                )}
+                {(['BUY', 'SELL'] as const).map((side) => {
+                  const rows = side === 'BUY' ? trades24h?.buy || [] : trades24h?.sell || [];
+                  const usd = side === 'BUY' ? trades24h?.buyUsd || 0 : trades24h?.sellUsd || 0;
+                  const open = trades24hSection === side;
+                  return (
+                    <div key={side} className="mb-1 last:mb-0">
+                      <button
+                        type="button"
+                        className={`w-full flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left border ${
+                          open ? 'border-white/15 bg-white/[0.04]' : 'border-transparent hover:bg-white/[0.03]'
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setTrades24hSection((cur) => (cur === side ? null : side));
+                        }}
+                      >
+                        <span className={`text-[11px] font-semibold ${side === 'BUY' ? 'text-ok' : 'text-danger'}`}>
+                          {side === 'BUY' ? '매수' : '매도'}
+                          <span className="ml-1.5 text-[10px] font-normal text-ink-500">{rows.length}건</span>
+                        </span>
+                        <span className={`text-[12px] font-mono tabular-nums ${side === 'BUY' ? 'text-ok' : 'text-danger'}`}>
+                          ${formatUsdCompact(usd)}
+                          {usdKrwRate != null && Number.isFinite(usdKrwRate) ? (
+                            <span className="ml-1.5 text-[10px] text-ink-500">₩{formatUsdCompact(usd * usdKrwRate)}</span>
+                          ) : null}
+                        </span>
+                      </button>
+                      {open && (
+                        <div className="mt-1 mb-1.5 px-1">
+                          {rows.length === 0 ? (
+                            <div className="text-[11px] text-ink-500 py-2">체결 없음</div>
+                          ) : (
+                            <>
+                              <div className="mb-1 grid grid-cols-[72px_1fr_auto] gap-x-2 px-0.5 text-[9px] uppercase tracking-wider text-ink-600">
+                                <span>Time</span>
+                                <span>Symbol</span>
+                                <span className="text-right">USDT</span>
+                              </div>
+                              <ul className="space-y-1 max-h-[min(280px,40vh)] overflow-y-auto custom-scrollbar overscroll-contain">
+                                {rows.map((row) => (
+                                  <li
+                                    key={`${row.symbol}-${row.id}`}
+                                    className="grid grid-cols-[72px_1fr_auto] gap-x-2 items-start text-[11px] font-mono border-b border-white/[0.04] last:border-0 py-1"
+                                  >
+                                    <span className="text-ink-500 tabular-nums text-[10px] leading-snug">
+                                      {formatSeoulTime(row.time).split(' ').slice(-1)[0] || formatSeoulTime(row.time)}
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="text-white truncate block">{row.symbol.replace(/USDT|USDC/g, '')}</span>
+                                      <span className="text-[10px] text-ink-500 tabular-nums">
+                                        {formatQty(row.qty)} @ {row.price >= 1 ? row.price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : row.price}
+                                      </span>
+                                    </span>
+                                    <span className={`tabular-nums text-right ${side === 'BUY' ? 'text-ok' : 'text-danger'}`}>
+                                      ${formatUsdCompact(row.quoteQty)}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                <p className="mt-1.5 pt-1.5 border-t border-white/[0.06] text-[9px] text-ink-600 leading-snug">
+                  선물 체결 기준. 포지션·주문·손익 심볼만 조회합니다.
+                </p>
+              </div>
             </div>
           </div>
 
