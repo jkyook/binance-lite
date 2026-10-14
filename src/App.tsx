@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   TrendingUp,
@@ -1586,7 +1587,11 @@ export default function App() {
       }
       
       setBulkOrderResults(results);
-      await fetchFuturesData();
+      try {
+        await fetchFuturesData();
+      } catch (refreshErr) {
+        console.error('Position refresh after bulk order failed:', refreshErr);
+      }
     } catch (err: any) {
       console.error("Bulk order process error:", err);
       alert(`Error during bulk order process: ${err.message}`);
@@ -3337,67 +3342,71 @@ export default function App() {
           )}
         </div>
 
-        <AnimatePresence>
-          {bulkOrderResults && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-ink-950/80 backdrop-blur-sm"
-            >
-              <div className="panel max-w-3xl w-full p-6 overflow-hidden flex flex-col max-h-[80vh]">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <Zap size={20} className="text-warn" />
-                    <h2 className="text-lg font-semibold text-white">Bulk order report</h2>
+        {bulkOrderResults && createPortal(
+          (() => {
+            const okCount = bulkOrderResults.filter(r => r.status === 'success').length;
+            const failCount = bulkOrderResults.filter(r => r.status === 'fail').length;
+            const headline = failCount === 0 ? '주문 성공' : okCount === 0 ? '주문 실패' : '일부 주문 실패';
+            return (
+              <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-ink-950/80 backdrop-blur-sm">
+                <div className="panel max-w-3xl w-full p-6 overflow-hidden flex flex-col max-h-[80vh] shadow-2xl">
+                  <div className="flex items-start justify-between mb-4 gap-3">
+                    <div>
+                      <h2 className={`text-xl font-semibold ${failCount === 0 ? 'text-ok' : 'text-danger'}`}>{headline}</h2>
+                      <p className="mt-1 text-sm font-mono text-ink-300">
+                        <span className="text-ok">성공 {okCount}건</span>
+                        <span className="text-ink-600"> · </span>
+                        <span className="text-danger">실패 {failCount}건</span>
+                        <span className="text-ink-600"> · </span>
+                        <span>총 {bulkOrderResults.length}건</span>
+                      </p>
+                    </div>
+                    <button onClick={() => setBulkOrderResults(null)} className="p-2 hover:bg-white/5 rounded-lg text-ink-400">
+                      <X size={18} />
+                    </button>
                   </div>
-                  <button onClick={() => setBulkOrderResults(null)} className="p-2 hover:bg-white/5 rounded-lg text-ink-400">
-                    <X size={18} />
-                  </button>
-                </div>
-                <div className="flex-1 overflow-y-auto custom-scrollbar border border-white/[0.06] rounded-xl">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-ink-950/80 sticky top-0">
-                      <tr>
-                        <th className="px-4 py-3 text-ink-400 font-medium">Symbol</th>
-                        <th className="px-4 py-3 text-ink-400 font-medium">Side</th>
-                        <th className="px-4 py-3 text-ink-400 font-medium">Qty</th>
-                        <th className="px-4 py-3 text-ink-400 font-medium">Status</th>
-                        <th className="px-4 py-3 text-ink-400 font-medium">Details</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/[0.04]">
-                      {bulkOrderResults.map((res, i) => (
-                        <tr key={i}>
-                          <td className="px-4 py-2.5 text-white font-semibold">{res.symbol}</td>
-                          <td className="px-4 py-2.5">
-                            <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${res.side === 'BUY' ? 'bg-ok/10 text-ok' : 'bg-danger/10 text-danger'}`}>{res.side}</span>
-                          </td>
-                          <td className="px-4 py-2.5 font-mono">{res.quantity}</td>
-                          <td className="px-4 py-2.5">
-                            {res.status === 'success' ? (
-                              <span className="text-ok font-semibold text-[10px]">SUCCESS</span>
-                            ) : (
-                              <span className="text-danger font-semibold text-[10px]">FAILED</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-2.5 text-ink-400 truncate max-w-[200px]" title={res.error}>{res.error || '—'}</td>
+                  <div className="flex-1 overflow-y-auto custom-scrollbar border border-white/[0.06] rounded-xl">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-ink-950/80 sticky top-0">
+                        <tr>
+                          <th className="px-4 py-3 text-ink-400 font-medium">종목</th>
+                          <th className="px-4 py-3 text-ink-400 font-medium">방향</th>
+                          <th className="px-4 py-3 text-ink-400 font-medium">수량</th>
+                          <th className="px-4 py-3 text-ink-400 font-medium">결과</th>
+                          <th className="px-4 py-3 text-ink-400 font-medium">내용</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="mt-4 flex justify-between items-center">
-                  <div className="flex gap-4 text-sm font-mono">
-                    <span>n={bulkOrderResults.length}</span>
-                    <span className="text-ok">ok {bulkOrderResults.filter(r => r.status === 'success').length}</span>
-                    <span className="text-danger">fail {bulkOrderResults.filter(r => r.status === 'fail').length}</span>
+                      </thead>
+                      <tbody className="divide-y divide-white/[0.04]">
+                        {bulkOrderResults.map((res, i) => (
+                          <tr key={i}>
+                            <td className="px-4 py-2.5 text-white font-semibold">{res.symbol}</td>
+                            <td className="px-4 py-2.5">
+                              <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${res.side === 'BUY' ? 'bg-ok/10 text-ok' : 'bg-danger/10 text-danger'}`}>{res.side === 'BUY' ? '롱' : '숏'}</span>
+                            </td>
+                            <td className="px-4 py-2.5 font-mono">{res.quantity}</td>
+                            <td className="px-4 py-2.5">
+                              {res.status === 'success' ? (
+                                <span className="text-ok font-semibold text-[10px]">성공</span>
+                              ) : (
+                                <span className="text-danger font-semibold text-[10px]">실패</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-2.5 text-ink-400 truncate max-w-[200px]" title={res.error}>{res.error || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                  <button onClick={() => setBulkOrderResults(null)} className="px-6 py-2 bg-accent text-ink-950 text-xs font-semibold rounded-lg">Close</button>
+                  <div className="mt-4 flex justify-end">
+                    <button onClick={() => setBulkOrderResults(null)} className="px-6 py-2 bg-accent text-ink-950 text-xs font-semibold rounded-lg">닫기</button>
+                  </div>
                 </div>
               </div>
-            </motion.div>
-          )}
+            );
+          })(),
+          document.body
+        )}
+        <AnimatePresence>
           {showLimitBuyForm && selectedOpenOrder && (
             <motion.div
               initial={{ opacity: 0 }}
