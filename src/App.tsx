@@ -1470,15 +1470,10 @@ export default function App() {
   };
 
   const handleBulkOrder = async (side: 'BUY' | 'SELL', onlyType: 'LONG' | 'SHORT') => {
-    if (!accountBalance || isAnalysing) return;
-    
-    const balance = parseFloat(accountBalance);
-    if (balance <= 0) {
-      alert("Account balance is zero.");
-      return;
-    }
+    if (isAnalysing) return;
 
-    const orderValueUsdt = balance * (orderPercent / 100);
+    // 슬라이더 0.5는 0.5%. 보유 1 ETH → 0.005 ETH.
+    const positionFraction = orderPercent / 100;
     const allHeld = bulkAllPositions;
     const targets = positions.filter(p => {
        const amt = parseFloat(p.positionAmt);
@@ -1499,7 +1494,7 @@ export default function App() {
       ? `롱·숏 보유 ${targets.length}개 전체`
       : `${onlyType} ${targets.length}개`;
     const etaSec = Math.ceil((targets.length * BULK_ORDER_GAP_MS) / 1000);
-    if (!confirm(`${scopeLabel}에 각각 ${orderPercent}%($${orderValueUsdt.toFixed(2)}) ${side === 'BUY' ? '롱' : '숏'}을 ${touchLabel} 지정가로 넣습니다. 주문 간격 ${BULK_ORDER_GAP_MS}ms (약 ${etaSec}초). 진행할까요?`)) {
+    if (!confirm(`${scopeLabel}에 각각 보유 수량의 ${orderPercent}% ${side === 'BUY' ? '롱' : '숏'}을 ${touchLabel} 지정가로 넣습니다. 1 ETH면 ${positionFraction.toFixed(4)} ETH. 주문 간격 ${BULK_ORDER_GAP_MS}ms (약 ${etaSec}초). 진행할까요?`)) {
       return;
     }
 
@@ -1530,8 +1525,8 @@ export default function App() {
           }
         }
 
-        const markPrice = parseFloat(pos.markPrice);
-        const fmtQuantity = formatQuantity(symbol, markPrice > 0 ? orderValueUsdt / markPrice : 0);
+        const heldQty = Math.abs(parseFloat(pos.positionAmt));
+        const fmtQuantity = formatQuantity(symbol, heldQty * positionFraction);
         const price = touchPrice(book, symbol, side);
         if (!(parseFloat(fmtQuantity) > 0)) {
           results.push({ symbol, side, quantity: '0', status: 'fail', error: 'Quantity too small' });
@@ -1949,7 +1944,7 @@ export default function App() {
                 <span className="text-[9px] font-semibold text-danger">SHORT +{orderPercent}%</span>
               </button>
             </div>
-            <p className="mt-2 text-[9px] text-ink-400 leading-snug">매수1·매도1 지정가. 주문 사이 {BULK_ORDER_GAP_MS}ms.</p>
+            <p className="mt-2 text-[9px] text-ink-400 leading-snug">보유 수량의 {orderPercent}%. 1 ETH면 {(orderPercent / 100).toFixed(4)} ETH. 매수1·매도1 지정가, 주문 사이 {BULK_ORDER_GAP_MS}ms.</p>
           </div>
 
           <div>
