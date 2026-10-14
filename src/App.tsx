@@ -3347,6 +3347,16 @@ export default function App() {
             const okCount = bulkOrderResults.filter(r => r.status === 'success').length;
             const failCount = bulkOrderResults.filter(r => r.status === 'fail').length;
             const headline = failCount === 0 ? '주문 성공' : okCount === 0 ? '주문 실패' : '일부 주문 실패';
+            const rowAmount = (res: { quantity: string; price?: string }) => {
+              const qty = parseFloat(res.quantity);
+              const px = parseFloat(res.price || '');
+              if (!(qty > 0) || !(px > 0)) return null;
+              return qty * px;
+            };
+            const successAmount = bulkOrderResults.reduce((sum, res) => {
+              if (res.status !== 'success') return sum;
+              return sum + (rowAmount(res) || 0);
+            }, 0);
             return (
               <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-ink-950/80 backdrop-blur-sm">
                 <div className="panel max-w-3xl w-full p-6 overflow-hidden flex flex-col max-h-[80vh] shadow-2xl">
@@ -3359,6 +3369,11 @@ export default function App() {
                         <span className="text-danger">실패 {failCount}건</span>
                         <span className="text-ink-600"> · </span>
                         <span>총 {bulkOrderResults.length}건</span>
+                        <span className="text-ink-600"> · </span>
+                        <span className="text-white">성공 금액 ${formatUsdCompact(successAmount)}</span>
+                        {usdKrwRate != null && Number.isFinite(usdKrwRate) ? (
+                          <span className="text-ink-400"> (₩{formatUsdCompact(successAmount * usdKrwRate)})</span>
+                        ) : null}
                       </p>
                     </div>
                     <button onClick={() => setBulkOrderResults(null)} className="p-2 hover:bg-white/5 rounded-lg text-ink-400">
@@ -3374,6 +3389,7 @@ export default function App() {
                           <th className="px-4 py-3 text-ink-400 font-medium">수량</th>
                           <th className="px-4 py-3 text-ink-400 font-medium">결과</th>
                           <th className="px-4 py-3 text-ink-400 font-medium">내용</th>
+                          <th className="px-4 py-3 text-ink-400 font-medium text-right">금액</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.04]">
@@ -3392,6 +3408,20 @@ export default function App() {
                               )}
                             </td>
                             <td className="px-4 py-2.5 text-ink-400 truncate max-w-[200px]" title={res.error}>{res.error || '—'}</td>
+                            <td className="px-4 py-2.5 font-mono text-right text-white">
+                              {(() => {
+                                const amt = rowAmount(res);
+                                if (amt == null) return '—';
+                                return (
+                                  <>
+                                    ${formatUsdCompact(amt)}
+                                    {usdKrwRate != null && Number.isFinite(usdKrwRate) ? (
+                                      <span className="block text-[10px] text-ink-400">₩{formatUsdCompact(amt * usdKrwRate)}</span>
+                                    ) : null}
+                                  </>
+                                );
+                              })()}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
