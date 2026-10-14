@@ -1856,9 +1856,11 @@ export default function App() {
           <div className="w-9 h-9 rounded-xl bg-accent/15 border border-accent/30 flex items-center justify-center">
             <Activity className="text-accent" size={18} />
           </div>
-          <div>
+          <div className="min-w-0">
             <div className="font-semibold tracking-tight text-white text-sm">Binance Lite</div>
-            <div className="text-[10px] text-ink-400 tracking-wide">Futures · 24h</div>
+            <form action="/api/logout" method="POST">
+              <button type="submit" className="text-[10px] text-ink-400 hover:text-white">로그아웃</button>
+            </form>
           </div>
         </div>
 

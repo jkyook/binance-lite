@@ -153,28 +153,7 @@ export class BinanceService {
   }
 
   static orderHeaders(): Record<string, string> {
-    const key = 'binance-lite-order-pin';
-    let pin = '';
-    try {
-      pin = sessionStorage.getItem(key) || '';
-    } catch {
-      pin = '';
-    }
-    if (!pin) {
-      const entered = window.prompt('주문 비밀번호를 입력하세요. 이 탭을 닫기 전까지 유지됩니다.');
-      pin = (entered || '').trim();
-      if (pin) {
-        try {
-          sessionStorage.setItem(key, pin);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    return {
-      'Content-Type': 'application/json',
-      'x-order-pin': pin,
-    };
+    return { 'Content-Type': 'application/json' };
   }
 
   static forgetOrderPin() {

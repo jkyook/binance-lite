@@ -254,6 +254,7 @@ async function lookupJupiterSymbols(mints: string[]): Promise<void> {
 }
 
 function requireOrderPin(req: express.Request, res: express.Response): boolean {
+  if (hasValidSession(req)) return true;
   if (!ORDER_PIN) {
     res.status(503).json({ error: "ORDER_PIN이 설정되지 않아 주문이 차단되었습니다." });
     return false;
@@ -266,6 +267,77 @@ function requireOrderPin(req: express.Request, res: express.Response): boolean {
     return false;
   }
   return true;
+}
+
+const SESSION_COOKIE = "bl_session";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const loginFailures = new Map<string, { count: number; lockUntil: number }>();
+
+function sessionSecret(): Buffer {
+  return crypto.createHash("sha256").update(`binance-lite-session-v1|${ORDER_PIN}`).digest();
+}
+
+function signSession(exp: number): string {
+  const sig = crypto.createHmac("sha256", sessionSecret()).update(String(exp)).digest("hex");
+  return `${exp}.${sig}`;
+}
+
+function hasValidSession(req: express.Request): boolean {
+  if (!ORDER_PIN) return false;
+  const raw = String(req.headers.cookie || "");
+  let token = "";
+  for (const part of raw.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed.startsWith(`${SESSION_COOKIE}=`)) continue;
+    token = decodeURIComponent(trimmed.slice(SESSION_COOKIE.length + 1));
+    break;
+  }
+  const dot = token.indexOf(".");
+  if (dot <= 0) return false;
+  const exp = Number(token.slice(0, dot));
+  const sig = token.slice(dot + 1);
+  if (!Number.isFinite(exp) || exp < Date.now() || !/^[0-9a-f]+$/i.test(sig)) return false;
+  const expected = crypto.createHmac("sha256", sessionSecret()).update(String(exp)).digest("hex");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  return true;
+}
+
+function clientIp(req: express.Request): string {
+  const cf = String(req.get("cf-connecting-ip") || "").trim();
+  if (cf) return cf;
+  const xff = String(req.get("x-forwarded-for") || "").split(",")[0].trim();
+  return xff || req.ip || "local";
+}
+
+function pinMatches(given: string): boolean {
+  if (!ORDER_PIN) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(ORDER_PIN);
+  if (a.length !== b.length) {
+    crypto.timingSafeEqual(b, b);
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
+
+function writeSessionCookie(res: express.Response, secure: boolean) {
+  const exp = Date.now() + SESSION_TTL_MS;
+  const value = signSession(exp);
+  const parts = [
+    `${SESSION_COOKIE}=${value}`,
+    "HttpOnly",
+    "Path=/",
+    "SameSite=Lax",
+    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+  ];
+  if (secure) parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function clearSessionCookie(res: express.Response) {
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`);
 }
 
 async function fetchJupiterPortfolio() {
@@ -363,6 +435,56 @@ async function startServer() {
 
   // Use JSON middleware at the top level
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+
+  const loginSecure = (req: express.Request) =>
+    req.secure || String(req.get("x-forwarded-proto") || "").split(",")[0].trim() === "https";
+
+  app.get("/api/session", (req, res) => {
+    if (!hasValidSession(req)) {
+      res.status(401).json({ ok: false });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  app.post("/api/login", (req, res) => {
+    if (!ORDER_PIN) {
+      res.status(503).json({ error: "ORDER_PIN이 설정되지 않았습니다." });
+      return;
+    }
+    const ip = clientIp(req);
+    const now = Date.now();
+    const attempt = loginFailures.get(ip);
+    if (attempt && attempt.lockUntil > now) {
+      res.redirect(303, "/?login=lock");
+      return;
+    }
+    const password = String(req.body?.password || "");
+    if (!pinMatches(password)) {
+      const count = (attempt && attempt.lockUntil <= now ? attempt.count : attempt?.count || 0) + 1;
+      const lockUntil = count >= 8 ? now + 15 * 60 * 1000 : 0;
+      loginFailures.set(ip, { count: lockUntil ? 0 : count, lockUntil });
+      res.redirect(303, "/?login=fail");
+      return;
+    }
+    loginFailures.delete(ip);
+    writeSessionCookie(res, loginSecure(req));
+    res.redirect(303, "/");
+  });
+
+  app.post("/api/logout", (_req, res) => {
+    clearSessionCookie(res);
+    res.redirect(303, "/");
+  });
+
+  app.use("/api", (req, res, next) => {
+    if (hasValidSession(req)) {
+      next();
+      return;
+    }
+    res.status(401).json({ error: "로그인이 필요합니다." });
+  });
 
   // Logging middleware
   app.use((req, res, next) => {
