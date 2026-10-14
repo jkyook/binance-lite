@@ -12,6 +12,27 @@ import { chatWithClaude, chatWithGemini, chatWithGrok, type ChatMessage } from "
 
 dotenv.config();
 
+// systemd 환경변수가 .env보다 먼저 있으면 dotenv는 덮어쓰지 않는다.
+// 그 경우 오래된 XAI_API_KEY가 남아 Grok이 400(Incorrect API key)을 반환한다.
+try {
+  const envPath = path.resolve(process.cwd(), ".env");
+  if (fs.existsSync(envPath)) {
+    const parsed = dotenv.parse(fs.readFileSync(envPath));
+    for (const name of ["XAI_API_KEY", "GROK_MODEL", "GEMINI_API_KEY", "CLAUDE_API_KEY", "AI_PROVIDER"]) {
+      const fromFile = parsed[name];
+      if (!fromFile) continue;
+      if (process.env[name] !== fromFile) {
+        console.warn(
+          `[Server Init] ${name} process env differs from .env; using .env`
+        );
+        process.env[name] = fromFile;
+      }
+    }
+  }
+} catch (err) {
+  console.warn("[Server Init] .env reparse skipped", err);
+}
+
 // 주문 입력 검증 스키마 — symbol/quantity/side/type 정합성 강제
 const SymbolSchema = z
   .string()
@@ -39,15 +60,15 @@ const QuantitySchema = z
 const PriceSchema = z
   .union([z.number(), z.string()])
   .transform((v, ctx) => {
-    const n = typeof v === "number" ? v : Number(v);
-    if (!Number.isFinite(n) || n <= 0) {
+    const s = (typeof v === "number" ? v.toString() : String(v)).trim();
+    if (!/^\d+(\.\d+)?$/.test(s) || !(Number(s) > 0)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "price는 0보다 큰 유한한 숫자여야 합니다.",
       });
       return z.NEVER;
     }
-    return n;
+    return s;
   });
 
 const OrderSchema = z
@@ -81,6 +102,17 @@ const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+function readSecret(name: string): string {
+  let raw = (process.env[name] || "").trim();
+  if (
+    (raw.startsWith('"') && raw.endsWith('"')) ||
+    (raw.startsWith("'") && raw.endsWith("'"))
+  ) {
+    raw = raw.slice(1, -1);
+  }
+  return raw;
+}
+const ORDER_PIN = readSecret("ORDER_PIN");
 const BASE_URL = "https://fapi.binance.com";
 const SPOT_BASE_URL = "https://api.binance.com";
 const BAN_FILE = path.join(process.cwd(), "data", "binance_ban_until");
@@ -116,11 +148,33 @@ if (binanceBanUntil > Date.now()) {
   );
 }
 let spotTickerCache: { at: number; map: Record<string, number> } | null = null;
+let bookTickerCache: {
+  at: number;
+  map: Record<string, { bidPrice: string; askPrice: string }>;
+} | null = null;
+const BOOK_TICKER_CACHE_MS = 2_000;
 let walletOverviewCache: { at: number; data: any } | null = null;
 let walletDetailsCache: { at: number; data: any } | null = null;
 const WALLET_OVERVIEW_CACHE_MS = 180_000; // 3분
 const WALLET_DETAILS_CACHE_MS = 180_000;
 const WALLET_DETAIL_GAP_MS = 450; // 상세 API 사이 간격 (IP 제한 완화)
+
+const DEFAULT_JUPITER_WALLET = "8nX7ULNGGapgbYrJzFsgKyPYog8jXtKREcWEMyvSjZG9";
+const JUPITER_WALLET = (process.env.JUPITER_WALLET || DEFAULT_JUPITER_WALLET).trim();
+const JUPITER_PORTFOLIO_CACHE_MS = 60_000;
+let jupiterPortfolioCache: { at: number; data: any } | null = null;
+const jupiterSymbolCache: Record<string, string> = {
+  "11111111111111111111111111111111": "SOL",
+  So11111111111111111111111111111111111111112: "SOL",
+};
+const JUPITER_PLATFORM_NAMES: Record<string, string> = {
+  "wallet-tokens": "Holdings",
+  "jupiter-exchange": "Jupiter",
+  "jupiter-governance": "Jupiter DAO",
+  orca: "Orca",
+  raydium: "Raydium",
+  "native-stake": "Validators",
+};
 
 console.log("[Server Init] BINANCE_API_KEY is", BINANCE_API_KEY ? "CONFIGURED" : "MISSING");
 console.log("[Server Init] BINANCE_API_SECRET is", BINANCE_API_SECRET ? "CONFIGURED" : "MISSING");
@@ -129,6 +183,8 @@ console.log("[Server Init] CLAUDE_API_KEY is", process.env.CLAUDE_API_KEY ? "CON
 console.log("[Server Init] XAI_API_KEY is", process.env.XAI_API_KEY ? "CONFIGURED" : "MISSING");
 console.log("[Server Init] TELEGRAM_BOT_TOKEN is", TELEGRAM_BOT_TOKEN ? "CONFIGURED" : "MISSING");
 console.log("[Server Init] TELEGRAM_CHAT_ID is", TELEGRAM_CHAT_ID ? "CONFIGURED" : "MISSING");
+console.log("[Server Init] JUPITER_WALLET is", JUPITER_WALLET ? JUPITER_WALLET.slice(0, 4) + "…" + JUPITER_WALLET.slice(-4) : "MISSING");
+console.log("[Server Init] ORDER_PIN is", ORDER_PIN ? "CONFIGURED" : "MISSING — orders blocked");
 
 let lastKnownIp = "unknown";
 fetch("https://api.ipify.org?format=json")
@@ -138,6 +194,166 @@ fetch("https://api.ipify.org?format=json")
     console.log("[Server Init] External IP:", lastKnownIp);
   })
   .catch(() => console.warn("[Server Init] Could not determine external IP"));
+
+function jupiterPlatformName(id: string): string {
+  if (JUPITER_PLATFORM_NAMES[id]) return JUPITER_PLATFORM_NAMES[id];
+  return id
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function jupiterTokenQty(amount: any): number {
+  if (!amount || typeof amount !== "object") return 0;
+  const raw = Number(amount.raw);
+  const decimals = Number(amount.decimals ?? 0);
+  if (!Number.isFinite(raw) || !Number.isFinite(decimals)) return 0;
+  return raw / Math.pow(10, decimals);
+}
+
+function jupiterTokenRows(
+  list: any[] | undefined,
+  side: "balance" | "stake" | "supply" | "borrow" | "reward"
+): Array<{ mint: string; qty: number; usd: number; side: string }> {
+  if (!Array.isArray(list)) return [];
+  const rows: Array<{ mint: string; qty: number; usd: number; side: string }> = [];
+  for (const item of list) {
+    const data = item?.data || {};
+    const mint = String(data.address || "");
+    const usd = Number(item?.value);
+    const qty = jupiterTokenQty(data.amount);
+    if (!mint || !Number.isFinite(usd)) continue;
+    if (Math.abs(usd) < 0.01 && Math.abs(qty) < 1e-9) continue;
+    rows.push({ mint, qty, usd, side });
+  }
+  return rows;
+}
+
+async function lookupJupiterSymbols(mints: string[]): Promise<void> {
+  const missing = Array.from(new Set(mints.filter((mint) => mint && !jupiterSymbolCache[mint])));
+  for (let i = 0; i < missing.length; i += 20) {
+    const chunk = missing.slice(i, i + 20);
+    const url = `https://datapi.jup.ag/v1/assets/search?query=${encodeURIComponent(chunk.join(","))}`;
+    try {
+      const response = await fetch(url, { headers: { accept: "application/json" } });
+      if (!response.ok) continue;
+      const rows = await response.json();
+      if (!Array.isArray(rows)) continue;
+      for (const row of rows) {
+        const id = String(row?.id || row?.address || "");
+        const symbol = String(row?.symbol || "").trim();
+        if (id && symbol) jupiterSymbolCache[id] = symbol;
+      }
+    } catch (err: any) {
+      console.warn("[Jupiter] symbol lookup failed:", err?.message || err);
+    }
+  }
+}
+
+function requireOrderPin(req: express.Request, res: express.Response): boolean {
+  if (!ORDER_PIN) {
+    res.status(503).json({ error: "ORDER_PIN이 설정되지 않아 주문이 차단되었습니다." });
+    return false;
+  }
+  const given = String(req.get("x-order-pin") || "");
+  const a = Buffer.from(given);
+  const b = Buffer.from(ORDER_PIN);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    res.status(401).json({ error: "주문 비밀번호가 올바르지 않습니다." });
+    return false;
+  }
+  return true;
+}
+
+async function fetchJupiterPortfolio() {
+  const url = `https://api.jup.ag/portfolio/v2/positions/${encodeURIComponent(JUPITER_WALLET)}?unpriced=false`;
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      origin: "https://jup.ag",
+      referer: "https://jup.ag/",
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    const error: any = new Error(`Jupiter portfolio ${response.status}: ${text.slice(0, 180)}`);
+    error.status = response.status >= 400 && response.status < 600 ? response.status : 502;
+    throw error;
+  }
+  const payload = await response.json();
+  const groups = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      usd: number;
+      rows: Array<{ mint: string; qty: number; usd: number; side: string }>;
+    }
+  >();
+
+  for (const fetcher of payload?.fetcherResults || []) {
+    for (const element of fetcher?.elements || []) {
+      const usd = Number(element?.value);
+      if (!Number.isFinite(usd) || Math.abs(usd) < 0.01) continue;
+      const id = String(element.platformId || fetcher.id || "other");
+      let group = groups.get(id);
+      if (!group) {
+        group = { id, name: jupiterPlatformName(id), usd: 0, rows: [] };
+        groups.set(id, group);
+      }
+      group.usd += usd;
+      const data = element.data || {};
+      const supply = jupiterTokenRows(data.suppliedAssets, "supply");
+      const borrow = jupiterTokenRows(data.borrowedAssets, "borrow");
+      const reward = jupiterTokenRows(data.rewardAssets, "reward").filter((row) => Math.abs(row.usd) >= 1);
+      if (supply.length || borrow.length) {
+        group.rows.push(...supply, ...borrow, ...reward);
+      } else {
+        const side = element.label === "Staked" ? "stake" : "balance";
+        group.rows.push(...jupiterTokenRows(data.assets, side), ...reward);
+      }
+    }
+  }
+
+  await lookupJupiterSymbols(
+    Array.from(groups.values()).flatMap((group) => group.rows.map((row) => row.mint))
+  );
+
+  const summarized = Array.from(groups.values())
+    .map((group) => {
+      const merged = new Map<string, { symbol: string; qty: number; usd: number; side: string }>();
+      for (const row of group.rows) {
+        const key = `${row.side}:${row.mint}`;
+        const symbol = jupiterSymbolCache[row.mint] || `${row.mint.slice(0, 4)}…`;
+        const prev = merged.get(key);
+        if (prev) {
+          prev.qty += row.qty;
+          prev.usd += row.usd;
+        } else {
+          merged.set(key, { symbol, qty: row.qty, usd: row.usd, side: row.side });
+        }
+      }
+      return {
+        id: group.id,
+        name: group.name,
+        usd: group.usd,
+        rows: Array.from(merged.values()).sort((a, b) => Math.abs(b.usd) - Math.abs(a.usd)),
+      };
+    })
+    .filter((group) => Math.abs(group.usd) >= 0.01)
+    .sort((a, b) => Math.abs(b.usd) - Math.abs(a.usd));
+
+  return {
+    address: JUPITER_WALLET,
+    quote: "USD",
+    totalUsd: summarized.reduce((sum, group) => sum + group.usd, 0),
+    groups: summarized,
+    updatedAt: Date.now(),
+    cached: false,
+    note: "Jupiter portfolio USD. Not included in Binance collateral.",
+  };
+}
 
 async function startServer() {
   const app = express();
@@ -381,7 +597,8 @@ async function startServer() {
   });
 
   apiRouter.post("/futures/batch-order", async (req, res) => {
-    console.log("[Route Hit] POST /api/futures/batch-order", req.body);
+    if (!requireOrderPin(req, res)) return;
+    console.log("[Route Hit] POST /api/futures/batch-order");
     const parsed = BatchOrderSchema.safeParse(req.body);
     if (!parsed.success) {
       const issues = parsed.error.issues.map(i => `${i.path.join(".") || "body"}: ${i.message}`);
@@ -396,7 +613,7 @@ async function startServer() {
           type: o.type,
           quantity: o.quantity.toString(),
         };
-        if (o.price !== undefined) out.price = o.price.toString();
+        if (o.price !== undefined) out.price = o.price;
         if (o.type === "LIMIT") out.timeInForce = "GTC";
         if (o.reduceOnly !== undefined) out.reduceOnly = o.reduceOnly.toString();
         return out;
@@ -415,7 +632,8 @@ async function startServer() {
   });
 
   apiRouter.post("/futures/order", async (req, res) => {
-    console.log("[Route Hit] POST /api/futures/order", req.body);
+    if (!requireOrderPin(req, res)) return;
+    console.log("[Route Hit] POST /api/futures/order");
     const parsed = OrderSchema.safeParse(req.body);
     if (!parsed.success) {
       const issues = parsed.error.issues.map(i => `${i.path.join(".") || "body"}: ${i.message}`);
@@ -431,7 +649,7 @@ async function startServer() {
         quantity: quantity.toString(),
       };
       if (reduceOnly !== undefined) params.reduceOnly = reduceOnly.toString();
-      if (price !== undefined) params.price = price.toString();
+      if (price !== undefined) params.price = price;
       if (type === "LIMIT") params.timeInForce = "GTC";
 
       const data = await binanceRequest("/fapi/v1/order", "POST", params);
@@ -443,7 +661,8 @@ async function startServer() {
   });
 
   apiRouter.delete("/futures/order", async (req, res) => {
-    console.log("[Route Hit] DELETE /api/futures/order", req.body);
+    if (!requireOrderPin(req, res)) return;
+    console.log("[Route Hit] DELETE /api/futures/order");
     try {
       const { symbol, orderId } = req.body;
       if (!symbol || !orderId) {
@@ -465,7 +684,8 @@ async function startServer() {
   });
 
   apiRouter.post("/futures/cancel-order", async (req, res) => {
-    console.log("[Route Hit] POST /api/futures/cancel-order", req.body);
+    if (!requireOrderPin(req, res)) return;
+    console.log("[Route Hit] POST /api/futures/cancel-order");
     try {
       const { symbol, orderId } = req.body;
       if (!symbol || !orderId) {
@@ -553,6 +773,63 @@ async function startServer() {
 
       const data = await binanceRequest("/fapi/v1/income", "GET", params);
       res.json(data);
+    } catch (err: any) {
+      sendApiError(res, err);
+    }
+  });
+
+  apiRouter.get("/futures/book-ticker", async (req, res) => {
+    try {
+      if (Date.now() < binanceBanUntil) {
+        const untilText = new Date(binanceBanUntil).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+        res.status(429).json({ error: `Binance IP ban active until ${untilText} KST` });
+        return;
+      }
+      const now = Date.now();
+      if (!bookTickerCache || now - bookTickerCache.at >= BOOK_TICKER_CACHE_MS) {
+        const response = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker`);
+        const text = await response.text();
+        let data: any = [];
+        try {
+          data = text ? JSON.parse(text) : [];
+        } catch {
+          data = { msg: text };
+        }
+        if (!response.ok) {
+          const msg = String(data?.msg || data?.error || text || "bookTicker failed");
+          if (response.status === 418 || data?.code === -1003) {
+            const banUntilMatch = msg.match(/banned until (\d+)/i);
+            const parsedBanUntil = banUntilMatch ? Number(banUntilMatch[1]) : 0;
+            binanceBanUntil = Number.isFinite(parsedBanUntil) && parsedBanUntil > Date.now()
+              ? parsedBanUntil
+              : Date.now() + 60 * 60 * 1000;
+            persistBanUntil(binanceBanUntil);
+          }
+          res.status(response.status === 418 || response.status === 429 ? 429 : response.status).json({ error: msg });
+          return;
+        }
+        const rows = Array.isArray(data) ? data : [data];
+        const map: Record<string, { bidPrice: string; askPrice: string }> = {};
+        for (const row of rows) {
+          const symbol = String(row?.symbol || "");
+          const bidPrice = String(row?.bidPrice || "");
+          const askPrice = String(row?.askPrice || "");
+          if (!symbol || !(Number(bidPrice) > 0) || !(Number(askPrice) > 0)) continue;
+          map[symbol] = { bidPrice, askPrice };
+        }
+        bookTickerCache = { at: now, map };
+      }
+      const symbol = String(req.query.symbol || "").trim().toUpperCase();
+      if (symbol) {
+        const row = bookTickerCache.map[symbol];
+        if (!row) {
+          res.status(404).json({ error: `${symbol} 호가를 찾지 못했습니다.` });
+          return;
+        }
+        res.json({ symbol, bidPrice: row.bidPrice, askPrice: row.askPrice });
+        return;
+      }
+      res.json({ tickers: bookTickerCache.map, updatedAt: bookTickerCache.at });
     } catch (err: any) {
       sendApiError(res, err);
     }
@@ -722,6 +999,27 @@ async function startServer() {
     } catch (err: any) {
       if (walletDetailsCache?.data) {
         res.json({ ...walletDetailsCache.data, cached: true, staleError: err?.message });
+        return;
+      }
+      sendApiError(res, err);
+    }
+  });
+
+  /** Jupiter portfolio (public wallet). USD 순자산 — 바이낸스 담보 합계에 넣지 않음. */
+  apiRouter.get("/jupiter/portfolio", async (req, res) => {
+    try {
+      const force = String(req.query.refresh || "") === "1";
+      if (!force && jupiterPortfolioCache && Date.now() - jupiterPortfolioCache.at < JUPITER_PORTFOLIO_CACHE_MS) {
+        res.json({ ...jupiterPortfolioCache.data, cached: true });
+        return;
+      }
+      const data = await fetchJupiterPortfolio();
+      jupiterPortfolioCache = { at: Date.now(), data };
+      res.json(data);
+    } catch (err: any) {
+      console.error("[Jupiter Portfolio Error]", err?.message || err);
+      if (jupiterPortfolioCache?.data) {
+        res.json({ ...jupiterPortfolioCache.data, cached: true, staleError: err?.message });
         return;
       }
       sendApiError(res, err);
@@ -961,9 +1259,9 @@ function selectAiProvider(requestedProvider?: unknown): AiProvider {
     throw new Error("AI_PROVIDER는 gemini, claude, grok, auto 중 하나여야 합니다.");
   }
 
+  if (process.env.XAI_API_KEY) return "grok";
   if (process.env.GEMINI_API_KEY) return "gemini";
   if (process.env.CLAUDE_API_KEY) return "claude";
-  if (process.env.XAI_API_KEY) return "grok";
   throw new Error("GEMINI_API_KEY, CLAUDE_API_KEY 또는 XAI_API_KEY 환경변수가 필요합니다.");
 }
 
@@ -972,7 +1270,8 @@ function requireEnv(name: "GEMINI_API_KEY" | "CLAUDE_API_KEY" | "XAI_API_KEY"): 
   if (!value) {
     throw new Error(`${name}가 서버 환경변수에 설정되지 않았습니다.`);
   }
-  return value;
+  // strip quotes / accidental inline-comment junk from .env copies
+  return String(value).trim().replace(/^["']|["']$/g, "").split(/\s+#/)[0].trim();
 }
 
 startServer().catch(err => {

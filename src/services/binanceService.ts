@@ -152,6 +152,49 @@ export class BinanceService {
     }
   }
 
+  static orderHeaders(): Record<string, string> {
+    const key = 'binance-lite-order-pin';
+    let pin = '';
+    try {
+      pin = sessionStorage.getItem(key) || '';
+    } catch {
+      pin = '';
+    }
+    if (!pin) {
+      const entered = window.prompt('주문 비밀번호를 입력하세요. 이 탭을 닫기 전까지 유지됩니다.');
+      pin = (entered || '').trim();
+      if (pin) {
+        try {
+          sessionStorage.setItem(key, pin);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return {
+      'Content-Type': 'application/json',
+      'x-order-pin': pin,
+    };
+  }
+
+  static forgetOrderPin() {
+    try {
+      sessionStorage.removeItem('binance-lite-order-pin');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  static async authorizedOrder(url: string, body: unknown): Promise<Response> {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: BinanceService.orderHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (response.status === 401) BinanceService.forgetOrderPin();
+    return response;
+  }
+
   // Futures Private Data via our server proxy
   static async getFuturesPositions(): Promise<FuturesPosition[]> {
     const response = await fetch('/api/futures/positions');
@@ -189,9 +232,10 @@ export class BinanceService {
   static async cancelFuturesOrder(symbol: string, orderId: number): Promise<any> {
     const response = await fetch('/api/futures/cancel-order', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: BinanceService.orderHeaders(),
       body: JSON.stringify({ symbol, orderId }),
     });
+    if (response.status === 401) BinanceService.forgetOrderPin();
     if (!response.ok) {
       const errorText = await response.text();
       let errorMsg = 'Failed to cancel order';
@@ -285,6 +329,34 @@ export class BinanceService {
     if (!response.ok) {
       const errorText = await response.text();
       let errorMsg = 'Failed to fetch wallets details';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMsg = errorJson.error || errorJson.msg || errorMsg;
+      } catch (e) {
+        errorMsg = errorText || errorMsg;
+      }
+      throw new Error(errorMsg);
+    }
+    return response.json();
+  }
+
+  static async getJupiterPortfolio(refresh = false): Promise<{
+    address: string;
+    quote: string;
+    totalUsd: number;
+    groups: Array<{
+      id: string;
+      name: string;
+      usd: number;
+      rows: Array<{ symbol: string; qty: number; usd: number; side: string }>;
+    }>;
+    updatedAt: number;
+    staleError?: string;
+  }> {
+    const response = await fetch(`/api/jupiter/portfolio${refresh ? '?refresh=1' : ''}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMsg = 'Failed to fetch Jupiter portfolio';
       try {
         const errorJson = JSON.parse(errorText);
         errorMsg = errorJson.error || errorJson.msg || errorMsg;

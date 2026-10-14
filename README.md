@@ -71,6 +71,7 @@ sudo systemctl restart binance-lite
 - `BINANCE_API_KEY` / `BINANCE_API_SECRET`
 - EC2: `LISTEN_HOST=0.0.0.0`, `PORT=3000`
 - AI(선택): `GEMINI_API_KEY` 등
+- Jupiter 잔고(선택): `JUPITER_WALLET` — 공개 주소. 바이낸스 담보 합계에는 넣지 않음
 
 ## 라이선스 / 주의
 

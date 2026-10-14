@@ -59,17 +59,29 @@ export async function chatWithClaude(
   return text;
 }
 
+function grokErrorMessage(payload: any, status: number, raw: string): string {
+  const err = payload?.error;
+  if (typeof err === "string" && err.trim()) return err.trim();
+  if (err && typeof err.message === "string" && err.message.trim()) return err.message.trim();
+  if (typeof payload?.message === "string" && payload.message.trim()) return payload.message.trim();
+  if (typeof payload?.code === "string" && payload.code.trim()) {
+    return `${payload.code}: ${raw.slice(0, 180)}`;
+  }
+  return `Grok chat failed (${status})`;
+}
+
 export async function chatWithGrok(
   apiKey: string,
   messages: ChatMessage[],
   context?: string
 ): Promise<string> {
-  const model = process.env.GROK_MODEL || "grok-4";
+  const model = process.env.GROK_MODEL || "grok-4.7";
+  const cleanedKey = String(apiKey || "").trim().replace(/^["']|["']$/g, "");
   const response = await fetch("https://api.x.ai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${cleanedKey}`,
     },
     body: JSON.stringify({
       model,
@@ -92,7 +104,7 @@ export async function chatWithGrok(
     throw new Error(`Grok 응답 파싱 실패: ${responseText.slice(0, 200)}`);
   }
   if (!response.ok) {
-    const err: any = new Error(payload?.error?.message || `Grok chat failed (${response.status})`);
+    const err: any = new Error(grokErrorMessage(payload, response.status, responseText));
     err.status = response.status;
     throw err;
   }

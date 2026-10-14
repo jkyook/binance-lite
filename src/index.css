@@ -43,7 +43,10 @@ body {
 }
 
 .kpi-chip {
-  @apply flex flex-col gap-0.5 rounded-xl border border-white/[0.06] bg-ink-950/50 px-3 py-1.5 min-w-[88px];
+  @apply flex flex-col gap-0.5 rounded-xl border border-white/[0.06] bg-ink-950/50 px-3 py-1.5 min-w-[96px];
+}
+.kpi-chip > .metric-label {
+  font-size: 11.5px;
 }
 
 .seg-btn {

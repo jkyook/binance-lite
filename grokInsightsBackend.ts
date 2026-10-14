@@ -5,7 +5,7 @@ export async function generateGrokMarketInsights(
   symbol: string,
   priceData: unknown[]
 ): Promise<MarketInsight> {
-  const model = process.env.GROK_MODEL || "grok-4";
+  const model = process.env.GROK_MODEL || "grok-4.7";
   const candleData = priceData.map((d: unknown) => {
     const row = d as unknown[];
     return { p: row[4], t: row[0] };

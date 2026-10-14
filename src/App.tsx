@@ -22,10 +22,14 @@ import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+// USD-M 주문 한도 300건/10초, 1200건/분. 450ms면 약 22건/10초라 한도에 닿지 않는다.
+// 호가 전체 조회(가중치 5)는 8건마다 다시 받아 1호가가 오래 묵지 않게 한다.
+const BULK_ORDER_GAP_MS = 450;
+const BULK_BOOK_REFRESH_EVERY = 8;
 const AI_PROVIDERS: { id: AiProvider; label: string }[] = [
+  { id: 'grok', label: 'Grok' },
   { id: 'gemini', label: 'Gemini' },
   { id: 'claude', label: 'Claude' },
-  { id: 'grok', label: 'Grok' },
 ];
 const PORTFOLIO_COLORS = ['#3b82f6', '#10b981', '#f43f5e', '#f59e0b', '#8b5cf6', '#06b6d4', '#ec4899', '#14b8a6', '#6366f1'];
 const ENABLE_USER_TRADES_SYNC = (import.meta as any).env?.VITE_ENABLE_USER_TRADES_SYNC === 'true';
@@ -101,11 +105,11 @@ const KpiDualMoney = ({
   const sign = signed && n >= 0 ? '+' : '';
   return (
     <div className="flex flex-col gap-0.5 leading-tight">
-      <span className={`text-sm font-mono tabular-nums ${valueClassName}`}>
+      <span className={`text-[16.1px] font-mono tabular-nums ${valueClassName}`}>
         {sign}${formatUsdCompact(n)}
       </span>
       {rate != null && Number.isFinite(rate) ? (
-        <span className={`text-[10px] font-mono tabular-nums text-ink-400 ${signed ? (n >= 0 ? 'text-ok/70' : 'text-danger/70') : ''}`}>
+        <span className={`text-[11.5px] font-mono tabular-nums text-ink-400 ${signed ? (n >= 0 ? 'text-ok/70' : 'text-danger/70') : ''}`}>
           {sign}₩{formatUsdCompact(n * rate)}
         </span>
       ) : null}
@@ -124,7 +128,7 @@ export default function App() {
   const [stats, setStats] = useState<Record<string, AssetStats & { history: number[] }>>({});
   const [insights, setInsights] = useState<Record<string, MarketInsight>>({});
   const [activeSymbol, setActiveSymbol] = useState('BTCUSDT');
-  const [aiProvider, setAiProvider] = useState<AiProvider>('gemini');
+  const [aiProvider, setAiProvider] = useState<AiProvider>('grok');
   const [isAnalysing, setIsAnalysing] = useState(false);
   const [aiChatOpen, setAiChatOpen] = useState(true);
   const [aiChatInput, setAiChatInput] = useState('');
@@ -153,6 +157,25 @@ export default function App() {
   const [allWalletsLoading, setAllWalletsLoading] = useState(false);
   const [allWalletsError, setAllWalletsError] = useState<string | null>(null);
   const [expandedWalletSection, setExpandedWalletSection] = useState<string | null>(null);
+  const [exposedOpen, setExposedOpen] = useState(false);
+  const exposedChipRef = useRef<HTMLDivElement | null>(null);
+  const [expandedExposedSection, setExpandedExposedSection] = useState<string | null>(null);
+  const [jupiterOpen, setJupiterOpen] = useState(false);
+  const jupiterChipRef = useRef<HTMLDivElement | null>(null);
+  const [jupiterPortfolio, setJupiterPortfolio] = useState<{
+    address: string;
+    totalUsd: number;
+    groups: Array<{
+      id: string;
+      name: string;
+      usd: number;
+      rows: Array<{ symbol: string; qty: number; usd: number; side: string }>;
+    }>;
+    updatedAt?: number;
+  } | null>(null);
+  const [jupiterLoading, setJupiterLoading] = useState(false);
+  const [jupiterError, setJupiterError] = useState<string | null>(null);
+  const [expandedJupiterGroup, setExpandedJupiterGroup] = useState<string | null>(null);
   const allWalletsOverviewAtRef = useRef(0);
   const allWalletsDetailsAtRef = useRef(0);
   const ALL_WALLETS_OVERVIEW_GAP_MS = 300_000; // 자동 갱신 5분
@@ -178,6 +201,7 @@ export default function App() {
   const [tradeSort, setTradeSort] = useState<'time' | 'pnl'>('time');
   const [showScenarios, setShowScenarios] = useState(false);
   const [orderPercent, setOrderPercent] = useState(0.1);
+  const [bulkAllPositions, setBulkAllPositions] = useState(false);
   const [usdKrwRate, setUsdKrwRate] = useState<number | null>(null);
   const [serverIp, setServerIp] = useState<string | null>(null);
   const [sendingTelegram, setSendingTelegram] = useState(false);
@@ -284,8 +308,40 @@ export default function App() {
     return formatted;
   };
 
-  const [bulkOrderResults, setBulkOrderResults] = useState<{ symbol: string, side: string, quantity: string, status: 'success' | 'fail', error?: string }[] | null>(null);
+  const alignToStep = (raw: string, step: string) => {
+    const trimmed = String(step).replace(/0+$/, '');
+    const decimals = trimmed.includes('.') ? (trimmed.split('.')[1] || '').length : 0;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    const factor = Math.pow(10, decimals);
+    const snapped = Math.floor(n * factor + 1e-8) / factor;
+    if (!(snapped > 0)) return '';
+    return snapped.toFixed(decimals);
+  };
+
+  const formatLimitPrice = (symbol: string, raw: string) => {
+    const symInfo = exchangeInfo?.symbols?.find((s: any) => s.symbol === symbol);
+    const tick = symInfo?.filters?.find((f: any) => f.filterType === 'PRICE_FILTER')?.tickSize;
+    if (!tick) return Number(raw) > 0 ? String(raw) : '';
+    return alignToStep(raw, String(tick));
+  };
+
+  const [bulkOrderResults, setBulkOrderResults] = useState<{ symbol: string, side: string, quantity: string, price?: string, status: 'success' | 'fail', error?: string }[] | null>(null);
   const [manualOrderSymbol, setManualOrderSymbol] = useState('BTCUSDT');
+  const manualSymbolGroups = useMemo(() => {
+    const pinned = Array.from(new Set([
+      ...positions.map(p => p.symbol),
+      ...SYMBOLS,
+      manualOrderSymbol,
+    ].filter(Boolean)));
+    const pinnedSet = new Set(pinned);
+    const rest = (exchangeInfo?.symbols || [])
+      .filter((s: any) => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && String(s.symbol || '').endsWith('USDT'))
+      .map((s: any) => String(s.symbol))
+      .filter((symbol: string) => !pinnedSet.has(symbol));
+    rest.sort();
+    return { pinned, rest };
+  }, [exchangeInfo, positions, manualOrderSymbol]);
   const [manualOrderQty, setManualOrderQty] = useState('0.001');
   const [manualOrderSide, setManualOrderSide] = useState<'BUY' | 'SELL'>('BUY');
   const [submittingManualOrder, setSubmittingManualOrder] = useState(false);
@@ -400,18 +456,44 @@ export default function App() {
 
     const stableUsdt = futuresStable + extraStable;
     const volatileUsdt = futuresVolatile + extraVolatile;
+
+    let jupiterStable = 0;
+    let jupiterVolatile = 0;
+    if (jupiterPortfolio?.groups?.length) {
+      for (const group of jupiterPortfolio.groups) {
+        for (const row of group.rows) {
+          const sym = String(row.symbol || '').toUpperCase();
+          const usd = Number(row.usd) || 0;
+          if (!sym || Math.abs(usd) < 0.01) continue;
+          const signed = row.side === 'borrow' ? -usd : usd;
+          if (STABLE_ASSETS.has(sym)) {
+            jupiterStable += signed;
+            stableSet.add(row.side === 'borrow' ? `${sym}대출` : sym);
+          } else {
+            jupiterVolatile += signed;
+            volatileSet.add(row.side === 'borrow' ? `${sym}대출` : sym);
+          }
+        }
+      }
+    }
+    // 별도 JLP(5,808.05)는 API 밖 포지션이라 순자산·담보에 넣지 않는다. Exposed 노셔널에만 표시.
+    if (Math.abs(jupiterStable) + Math.abs(jupiterVolatile) > 0.01) {
+      extraByWallet.push({ name: 'Jupiter', stable: jupiterStable, volatile: jupiterVolatile });
+    }
+
     return {
-      stableUsdt,
-      volatileUsdt,
-      totalWallet: stableUsdt + volatileUsdt,
+      stableUsdt: stableUsdt + jupiterStable,
+      volatileUsdt: volatileUsdt + jupiterVolatile,
+      totalWallet: stableUsdt + volatileUsdt + jupiterStable + jupiterVolatile,
       futuresWallet,
-      extraWallet: extraStable + extraVolatile,
+      extraWallet: extraStable + extraVolatile + jupiterStable + jupiterVolatile,
       extraByWallet,
       stableAssets: Array.from(stableSet),
       volatileAssets: Array.from(volatileSet),
-      includesOtherWallets: extraStable + extraVolatile > 0.01,
+      includesOtherWallets: extraStable + extraVolatile + Math.abs(jupiterStable) + Math.abs(jupiterVolatile) > 0.01,
+      jupiterUsd: jupiterStable + jupiterVolatile,
     };
-  }, [accountInfo, allWalletsDetails, allWalletsOverview]);
+  }, [accountInfo, allWalletsDetails, allWalletsOverview, jupiterPortfolio]);
 
   useEffect(() => {
     if (!walletAssetsOpen) return;
@@ -468,6 +550,53 @@ export default function App() {
       setAllWalletsLoading(false);
     }
   };
+
+  const fetchJupiterPortfolio = async (opts?: { force?: boolean }) => {
+    const force = !!opts?.force;
+    if (force) setJupiterLoading(true);
+    try {
+      const data = await BinanceService.getJupiterPortfolio(force);
+      setJupiterPortfolio({
+        address: data.address,
+        totalUsd: data.totalUsd,
+        groups: data.groups || [],
+        updatedAt: data.updatedAt,
+      });
+      setJupiterError(data.staleError || null);
+    } catch (e: any) {
+      setJupiterError(e?.message || 'Jupiter 잔고 조회 실패');
+    } finally {
+      if (force) setJupiterLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchJupiterPortfolio();
+    const timer = setInterval(() => { void fetchJupiterPortfolio(); }, 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!jupiterOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!jupiterChipRef.current?.contains(e.target as Node)) {
+        setJupiterOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [jupiterOpen]);
+
+  useEffect(() => {
+    if (!exposedOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!exposedChipRef.current?.contains(e.target as Node)) {
+        setExposedOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [exposedOpen]);
 
   // Wallet 호버/클릭용 담보 자산 내역 (수량 + USDT 평가액)
   // 주의: multi-asset에서 BTC/ETH 등의 marginBalance·walletBalance는 코인 수량이지 USDT가 아님
@@ -530,7 +659,7 @@ export default function App() {
   const scenarioResults = useMemo(() => {
     if (!accountInfo || !accountInfo.assets) return [];
 
-    const scenarios = [-50, -40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 50];
+    const scenarios = [-50, -40, -30, -20, -10, -5, 0, 5, 10, 20, 30, 50, 100, 200, 300];
     const { stableUsdt: stableCollateralUsdt, volatileUsdt: volatileCollateralUsdt } = scenarioCollateral;
 
     return scenarios.map(pct => {
@@ -1148,27 +1277,61 @@ export default function App() {
     setError(null);
   };
 
+  const loadBook = async (symbol?: string): Promise<Record<string, { bidPrice: string; askPrice: string }>> => {
+    const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
+    const res = await fetch(`/api/futures/book-ticker${q}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error || data?.msg || `호가 조회 실패 (${res.status})`);
+    if (symbol) {
+      return { [symbol]: { bidPrice: String(data.bidPrice), askPrice: String(data.askPrice) } };
+    }
+    return data.tickers || {};
+  };
+
+  const touchPrice = (
+    book: Record<string, { bidPrice: string; askPrice: string }>,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+  ) => {
+    const row = book[symbol];
+    if (!row) return '';
+    const raw = side === 'BUY' ? row.bidPrice : row.askPrice;
+    return formatLimitPrice(symbol, raw);
+  };
+
   const executeManualOrder = async () => {
     if (submittingManualOrder) return;
-    if (!window.confirm(`${manualOrderSide} ${manualOrderQty} ${manualOrderSymbol.toUpperCase()} 시장가 주문을 실행합니다. 진행할까요?`)) return;
+    const symbol = manualOrderSymbol.toUpperCase().trim();
+    const quantity = formatQuantity(symbol, parseFloat(manualOrderQty));
+    if (!(parseFloat(quantity) > 0)) {
+      alert('수량을 확인해 주세요.');
+      return;
+    }
     setSubmittingManualOrder(true);
-    addLog(`Manual Order Start: ${manualOrderSide} ${manualOrderQty} ${manualOrderSymbol}`);
+    addLog(`Manual Order Start: ${manualOrderSide} ${quantity} ${symbol} @ best ${manualOrderSide === 'BUY' ? 'bid' : 'ask'}`);
     try {
+      const book = await loadBook(symbol);
+      const price = touchPrice(book, symbol, manualOrderSide);
+      if (!price) {
+        addLog('FAILED: 1호가를 가져오지 못했습니다.');
+        alert(`${symbol} 1호가를 가져오지 못했습니다.`);
+        return;
+      }
+      const touchLabel = manualOrderSide === 'BUY' ? '매수1호가' : '매도1호가';
+      if (!window.confirm(`${manualOrderSide} ${quantity} ${symbol} @ ${price} (${touchLabel} 지정가) 주문을 실행합니다. 진행할까요?`)) return;
+
       const payload = {
-        symbol: manualOrderSymbol.toUpperCase().trim(),
+        symbol,
         side: manualOrderSide,
-        type: 'MARKET',
-        quantity: manualOrderQty,
+        type: 'LIMIT',
+        quantity,
+        price,
       };
 
       const endpoint = '/api/futures/order';
-      addLog(`Requesting: POST ${endpoint}...`);
+      addLog(`Requesting: POST ${endpoint} LIMIT @ ${price}...`);
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      const res = await BinanceService.authorizedOrder(endpoint, payload);
 
       addLog(`Response Status: ${res.status}`);
       const text = await res.text();
@@ -1239,17 +1402,13 @@ export default function App() {
     setPlacingBuyOrderKey(orderKey);
     addLog(`Limit Buy Start: BUY ${limitBuyQty} ${selectedOrder.symbol} @ ${limitBuyPrice}`);
     try {
-      const res = await fetch('/api/futures/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const res = await BinanceService.authorizedOrder('/api/futures/order', {
           symbol: selectedOrder.symbol,
           side: 'BUY',
           type: 'LIMIT',
           quantity: limitBuyQty.trim(),
           price: limitBuyPrice.trim(),
-        }),
-      });
+        });
 
       const text = await res.text();
       if (!res.ok) {
@@ -1286,100 +1445,112 @@ export default function App() {
       return;
     }
 
-    const orderValueUsdt = balance * (orderPercent / 100); 
+    const orderValueUsdt = balance * (orderPercent / 100);
+    const allHeld = bulkAllPositions;
     const targets = positions.filter(p => {
        const amt = parseFloat(p.positionAmt);
+       if (!(amt !== 0)) return false;
+       if (allHeld) return true;
        if (onlyType === 'LONG') return amt > 0;
        if (onlyType === 'SHORT') return amt < 0;
        return false;
     });
 
     if (targets.length === 0) {
-      alert(`No active ${onlyType} positions found.`);
+      alert(allHeld ? '보유 중인 포지션이 없습니다.' : `No active ${onlyType} positions found.`);
       return;
     }
 
-    if (!confirm(`${targets.length}개의 ${onlyType} 포지션에 대해 각각 ${orderPercent}%($${orderValueUsdt.toFixed(2)}) 만큼 ${side === 'BUY' ? '추가매수' : '추가매도'}를 실행하시겠습니까?`)) {
+    const touchLabel = side === 'BUY' ? '매수1호가' : '매도1호가';
+    const scopeLabel = allHeld
+      ? `롱·숏 보유 ${targets.length}개 전체`
+      : `${onlyType} ${targets.length}개`;
+    const etaSec = Math.ceil((targets.length * BULK_ORDER_GAP_MS) / 1000);
+    if (!confirm(`${scopeLabel}에 각각 ${orderPercent}%($${orderValueUsdt.toFixed(2)}) ${side === 'BUY' ? '롱' : '숏'}을 ${touchLabel} 지정가로 넣습니다. 주문 간격 ${BULK_ORDER_GAP_MS}ms (약 ${etaSec}초). 진행할까요?`)) {
       return;
     }
 
     setIsAnalysing(true);
-    const results: { symbol: string, side: string, quantity: string, status: 'success' | 'fail', error?: string }[] = [];
-
-    // Group targets into batches of 5 (Binance limit for batch orders)
-    const batches: any[][] = [];
-    for (let i = 0; i < targets.length; i += 5) {
-      batches.push(targets.slice(i, i + 5));
-    }
+    const results: { symbol: string, side: string, quantity: string, price?: string, status: 'success' | 'fail', error?: string }[] = [];
 
     try {
-      for (const batch of batches) {
-        const orderParams = batch.map(pos => {
-          const markPrice = parseFloat(pos.markPrice);
-          const quantity = orderValueUsdt / markPrice;
-          const fmtQuantity = formatQuantity(pos.symbol, quantity);
-          
-          return {
-            symbol: pos.symbol.trim().toUpperCase(),
-            side,
-            type: 'MARKET',
-            quantity: fmtQuantity.toString(),
-          };
-        }).filter(o => parseFloat(o.quantity) > 0);
+      let book: Record<string, { bidPrice: string; askPrice: string }> = {};
+      let bookLoadedAt = -BULK_BOOK_REFRESH_EVERY;
+      for (let i = 0; i < targets.length; i++) {
+        const pos = targets[i];
+        const symbol = pos.symbol.trim().toUpperCase();
+        if (i - bookLoadedAt >= BULK_BOOK_REFRESH_EVERY) {
+          try {
+            book = await loadBook();
+            bookLoadedAt = i;
+          } catch (e: any) {
+            const msg = e?.message || '호가 조회 실패';
+            if (/ban|429|418|-1003|too many/i.test(msg)) {
+              for (let j = i; j < targets.length; j++) {
+                results.push({ symbol: targets[j].symbol, side, quantity: '?', status: 'fail', error: `중단: ${msg}` });
+              }
+              break;
+            }
+            results.push({ symbol, side, quantity: '?', status: 'fail', error: msg });
+            await new Promise(r => setTimeout(r, BULK_ORDER_GAP_MS));
+            continue;
+          }
+        }
 
-        if (orderParams.length === 0) {
-          batch.forEach(pos => results.push({ symbol: pos.symbol, side, quantity: '0', status: 'fail', error: 'Quantity too small' }));
+        const markPrice = parseFloat(pos.markPrice);
+        const fmtQuantity = formatQuantity(symbol, markPrice > 0 ? orderValueUsdt / markPrice : 0);
+        const price = touchPrice(book, symbol, side);
+        if (!(parseFloat(fmtQuantity) > 0)) {
+          results.push({ symbol, side, quantity: '0', status: 'fail', error: 'Quantity too small' });
+          continue;
+        }
+        if (!price) {
+          results.push({ symbol, side, quantity: fmtQuantity, status: 'fail', error: '1호가 없음' });
           continue;
         }
 
         try {
-          const endpoint = '/api/futures/batch-order';
-          console.log(`[Bulk] Sending batch for symbols: ${orderParams.map(o => o.symbol).join(', ')}`);
-          
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ orders: orderParams }),
+          const res = await BinanceService.authorizedOrder('/api/futures/order', {
+            symbol,
+            side,
+            type: 'LIMIT',
+            quantity: fmtQuantity,
+            price,
           });
-          
-          if (res.ok) {
-            const data = await res.json();
-            if (Array.isArray(data)) {
-              data.forEach((orderRes, idx) => {
-                // Find matching original position by symbol if possible
-                const targetSymbol = orderParams[idx]?.symbol;
-                const pos = batch.find(p => p.symbol === targetSymbol) || batch[idx];
-                
-                if (orderRes.orderId) {
-                  results.push({ symbol: pos.symbol, side, quantity: orderParams[idx]?.quantity || '?', status: 'success' });
-                } else {
-                  let errMsg = orderRes.msg || 'Item failed';
-                  if (orderRes.code === -4164) errMsg = "Order value below minimum ($5)";
-                  results.push({ symbol: pos.symbol, side, quantity: orderParams[idx]?.quantity || '?', status: 'fail', error: errMsg });
-                }
-              });
-            } else {
-              batch.forEach(pos => results.push({ symbol: pos.symbol, side, quantity: '?', status: 'fail', error: 'Invalid response format from server' }));
-            }
-          } else {
-            const text = await res.text();
-            let errorMessage = 'Unknown error';
+          const text = await res.text();
+          if (!res.ok) {
+            let errorMessage = text || `Server error (${res.status})`;
             try {
               const err = JSON.parse(text);
-              errorMessage = err.error || err.msg || text;
-            } catch (e) {
-              errorMessage = text || `Server error (${res.status})`;
+              errorMessage = err.error || err.msg || errorMessage;
+              if (err.code === -4164) errorMessage = 'Order value below minimum ($5)';
+            } catch {
+              /* raw text */
             }
-            batch.forEach((pos) => {
-               const targetItem = orderParams.find(o => o.symbol === pos.symbol);
-               results.push({ symbol: pos.symbol, side, quantity: targetItem?.quantity || '?', status: 'fail', error: errorMessage });
-            });
+            results.push({ symbol, side, quantity: fmtQuantity, price, status: 'fail', error: errorMessage });
+            if (/ban|429|418|-1003|too many/i.test(errorMessage)) {
+              for (let j = i + 1; j < targets.length; j++) {
+                results.push({ symbol: targets[j].symbol, side, quantity: '?', status: 'fail', error: '중단: API 제한' });
+              }
+              break;
+            }
+          } else {
+            const data = JSON.parse(text);
+            if (data.orderId) {
+              results.push({ symbol, side, quantity: fmtQuantity, price, status: 'success', error: `@ ${price}` });
+            } else {
+              let errMsg = data.msg || 'Item failed';
+              if (data.code === -4164) errMsg = 'Order value below minimum ($5)';
+              results.push({ symbol, side, quantity: fmtQuantity, price, status: 'fail', error: errMsg });
+            }
           }
         } catch (e: any) {
-          batch.forEach(pos => results.push({ symbol: pos.symbol, side, quantity: '?', status: 'fail', error: e.message }));
+          results.push({ symbol, side, quantity: fmtQuantity, price, status: 'fail', error: e.message });
         }
-        
-        await new Promise(r => setTimeout(r, 300));
+
+        if (i < targets.length - 1) {
+          await new Promise(r => setTimeout(r, BULK_ORDER_GAP_MS));
+        }
       }
       
       setBulkOrderResults(results);
@@ -1420,13 +1591,50 @@ export default function App() {
   const totalUPNL = positions.reduce((acc, p) => acc + parseFloat(p.unRealizedProfit), 0);
   const totalExposure = positions.reduce((acc, p) => acc + (Math.abs(parseFloat(p.positionAmt)) * parseFloat(p.markPrice)), 0);
   const netExposure = positions.reduce((acc, p) => acc + (parseFloat(p.positionAmt) * parseFloat(p.markPrice)), 0);
-  // Exposed = 포지션 노셔널 + 전체 지갑(USDT). overview에 USD-M이 이미 포함되어 중복 없음.
-  // overview 없으면 USD-M wallet만 fallback.
+  // Exposed = 포지션 노셔널 + 전체 지갑(USDT) + Jupiter 순자산(USD).
+  // overview에 USD-M이 이미 포함되어 중복 없음. overview 없으면 USD-M wallet만 fallback.
+  // Jupiter API 자산·대출만 시나리오 순자산에 넣는다. 별도 JLP는 포지션이라 순자산에서 제외.
   const allWalletsUsdtForExposed =
     allWalletsOverview && Number.isFinite(allWalletsOverview.totalUsdt)
       ? allWalletsOverview.totalUsdt
       : parseFloat(accountBalance) || 0;
-  const totalValuationPlusWallet = totalExposure + allWalletsUsdtForExposed;
+  const jupiterUsdForExposed =
+    jupiterPortfolio && Number.isFinite(jupiterPortfolio.totalUsd) ? jupiterPortfolio.totalUsd : 0;
+  // API 순자산 밖 Jupiter 디파이 JLP. 2026-10-10 $27,000 / $4.648722 로 수량을 고정하고 시세로 재평가.
+  const jupiterDefiJlpQty = 27_000 / 4.648722;
+  let jupiterDefiJlpPrice = 4.648722;
+  if (jupiterPortfolio) {
+    let pricedQty = 0;
+    for (const group of jupiterPortfolio.groups) {
+      for (const row of group.rows) {
+        if (row.symbol !== 'JLP' || !(row.qty > 0) || !(row.usd > 0)) continue;
+        if (row.qty > pricedQty) {
+          pricedQty = row.qty;
+          jupiterDefiJlpPrice = row.usd / row.qty;
+        }
+      }
+    }
+  }
+  const jupiterDefiExtraUsd = jupiterDefiJlpQty * jupiterDefiJlpPrice;
+  const totalValuationPlusWallet =
+    totalExposure + allWalletsUsdtForExposed + jupiterUsdForExposed + jupiterDefiExtraUsd;
+  const exposedPositionRows = positions
+    .map((p) => ({
+      symbol: p.symbol,
+      usd: Math.abs(parseFloat(p.positionAmt) || 0) * (parseFloat(p.markPrice) || 0),
+    }))
+    .filter((row) => Number.isFinite(row.usd) && row.usd >= 1)
+    .sort((a, b) => b.usd - a.usd);
+  const headerQuoteSymbols = useMemo(() => {
+    return positions
+      .map((p) => ({
+        symbol: p.symbol,
+        usd: Math.abs(parseFloat(p.positionAmt) || 0) * (parseFloat(p.markPrice) || 0),
+        mark: parseFloat(p.markPrice) || 0,
+      }))
+      .filter((row) => Number.isFinite(row.usd) && row.usd >= 300)
+      .sort((a, b) => b.usd - a.usd);
+  }, [positions]);
 
   useEffect(() => {
     const el = aiChatListRef.current;
@@ -1677,6 +1885,15 @@ export default function App() {
               onChange={(e) => setOrderPercent(parseFloat(e.target.value))}
               className="w-full h-1.5 bg-ink-700 rounded-full appearance-none cursor-pointer accent-[var(--color-accent)] mb-3"
             />
+            <label className="mb-2 flex items-start gap-2 text-[10px] leading-snug text-ink-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={bulkAllPositions}
+                onChange={(e) => setBulkAllPositions(e.target.checked)}
+                className="mt-0.5 accent-[var(--color-accent)]"
+              />
+              <span>전체 포지션. 체크 후 롱을 누르면 롱·숏 보유 종목 모두에 롱(매수1호가)이 들어갑니다.</span>
+            </label>
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handleBulkOrder('BUY', 'LONG')}
@@ -1695,6 +1912,7 @@ export default function App() {
                 <span className="text-[9px] font-semibold text-danger">SHORT +{orderPercent}%</span>
               </button>
             </div>
+            <p className="mt-2 text-[9px] text-ink-400 leading-snug">매수1·매도1 지정가. 주문 사이 {BULK_ORDER_GAP_MS}ms.</p>
           </div>
 
           <div>
@@ -1752,16 +1970,21 @@ export default function App() {
               <span className="text-ink-400 font-mono text-[11px]">/{activeSymbol}</span>
             </div>
 
-            <div className="flex-1 flex justify-center gap-1 overflow-x-auto custom-scrollbar min-w-0">
-              {SYMBOLS.map(symbol => {
+            <div className="flex-1 flex justify-start gap-1 overflow-x-auto custom-scrollbar min-w-0">
+              {(headerQuoteSymbols.length
+                ? headerQuoteSymbols
+                : SYMBOLS.map((symbol) => ({ symbol, usd: 0, mark: 0 }))
+              ).map((quote) => {
+                const symbol = quote.symbol;
                 const ch = parseFloat(stats[symbol]?.change24h || '0');
                 const tickerPrice = formatTickerPrice(stats[symbol]?.price);
                 return (
                   <button
                     key={symbol}
                     onClick={() => setActiveSymbol(symbol)}
-                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border transition-all shrink-0 ${
-                      activeSymbol === symbol ? 'bg-accent-dim border-accent/35' : 'border-transparent opacity-55 hover:opacity-100'
+                    title={`${symbol} 포지션 $${formatUsdCompact(quote.usd)}`}
+                    className={`flex items-center gap-2 px-2 py-1 rounded-lg border transition-all shrink-0 ${
+                      activeSymbol === symbol ? 'bg-accent-dim border-accent/35' : 'border-transparent opacity-80 hover:opacity-100'
                     }`}
                   >
                     <div className="flex flex-col min-w-[72px] items-start leading-tight">
@@ -1822,11 +2045,124 @@ export default function App() {
 
           <div className="px-4 lg:px-6 pb-3 flex flex-wrap gap-2">
             <div
-              className="kpi-chip"
-              title={`전체노출 = 포지션 $${formatUsdCompact(totalExposure)} + 지갑(선물·현물·Earn 등) $${formatUsdCompact(allWalletsUsdtForExposed)}${allWalletsOverview ? '' : ' (USD-M만, 전체지갑 대기)'}`}
+              ref={exposedChipRef}
+              className={`kpi-chip relative cursor-pointer select-none ${exposedOpen ? 'border-accent/40' : ''}`}
+              onClick={() => setExposedOpen((open) => !open)}
+              title={exposedOpen ? '클릭하면 닫기' : '클릭하면 전체노출 내역'}
             >
               <span className="metric-label">Exposed</span>
               <KpiDualMoney usd={totalValuationPlusWallet} rate={usdKrwRate} />
+              <div
+                className={`absolute left-0 top-full z-[60] mt-1.5 w-[min(380px,calc(100vw-2rem))] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
+                  exposedOpen ? 'block pointer-events-auto' : 'hidden pointer-events-none'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">
+                    전체노출
+                  </span>
+                  {exposedOpen && (
+                    <button
+                      type="button"
+                      className="text-[10px] text-ink-500 hover:text-white"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExposedOpen(false);
+                      }}
+                    >
+                      닫기
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-1.5 max-h-[min(420px,55vh)] overflow-y-auto custom-scrollbar overscroll-contain">
+                  <div className="rounded-lg border border-white/[0.05] overflow-hidden">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] font-mono hover:bg-white/[0.03]"
+                      onClick={() => setExpandedExposedSection((cur) => (cur === 'position' ? null : 'position'))}
+                    >
+                      <span className="text-ink-300">포지션</span>
+                      <span className="text-accent tabular-nums">${formatUsdCompact(totalExposure)}</span>
+                    </button>
+                    {expandedExposedSection === 'position' && (
+                      <ul className="px-2 pb-1.5 space-y-0.5 border-t border-white/[0.04]">
+                        {exposedPositionRows.slice(0, 40).map((row) => (
+                          <li key={row.symbol} className="flex justify-between gap-2 text-[10px] font-mono py-0.5">
+                            <span className="text-ink-400">{row.symbol}</span>
+                            <span className="text-white tabular-nums">${formatUsdCompact(row.usd)}</span>
+                          </li>
+                        ))}
+                        {exposedPositionRows.length === 0 && (
+                          <li className="text-[10px] text-ink-600 py-1">포지션 없음</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-white/[0.05] overflow-hidden">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] font-mono hover:bg-white/[0.03]"
+                      onClick={() => setExpandedExposedSection((cur) => (cur === 'wallets' ? null : 'wallets'))}
+                    >
+                      <span className="text-ink-300">전체 지갑{allWalletsOverview ? '' : ' (USD-M)'}</span>
+                      <span className="text-accent tabular-nums">${formatUsdCompact(allWalletsUsdtForExposed)}</span>
+                    </button>
+                    {expandedExposedSection === 'wallets' && (
+                      <ul className="px-2 pb-1.5 space-y-0.5 border-t border-white/[0.04]">
+                        {(allWalletsOverview?.wallets || [])
+                          .filter((w) => Math.abs(w.balanceUsdt) > 0.01)
+                          .map((w) => (
+                            <li key={w.name} className="flex justify-between gap-2 text-[10px] font-mono py-0.5">
+                              <span className="text-ink-400 truncate">{w.name}</span>
+                              <span className="text-white tabular-nums">${formatUsdCompact(w.balanceUsdt)}</span>
+                            </li>
+                          ))}
+                        {!allWalletsOverview && (
+                          <li className="text-[10px] text-ink-600 py-1">USD-M 담보만 반영 중</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-white/[0.05] overflow-hidden">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] font-mono hover:bg-white/[0.03]"
+                      onClick={() => setExpandedExposedSection((cur) => (cur === 'jupiter' ? null : 'jupiter'))}
+                    >
+                      <span className="text-ink-300">Jupiter</span>
+                      <span className="text-accent tabular-nums">${formatUsdCompact(jupiterUsdForExposed)}</span>
+                    </button>
+                    {expandedExposedSection === 'jupiter' && (
+                      <ul className="px-2 pb-1.5 space-y-0.5 border-t border-white/[0.04]">
+                        {(jupiterPortfolio?.groups || []).map((group) => (
+                          <li key={group.id} className="flex justify-between gap-2 text-[10px] font-mono py-0.5">
+                            <span className="text-ink-400">{group.name}</span>
+                            <span className="text-white tabular-nums">${formatUsdCompact(group.usd)}</span>
+                          </li>
+                        ))}
+                        {!jupiterPortfolio && (
+                          <li className="text-[10px] text-ink-600 py-1">불러오는 중…</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-white/[0.05] px-2 py-1.5">
+                    <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                      <span className="text-ink-300">JLP 디파이</span>
+                      <span className="text-accent tabular-nums">${formatUsdCompact(jupiterDefiExtraUsd)}</span>
+                    </div>
+                    <p className="mt-0.5 text-[10px] font-mono text-ink-500 tabular-nums">
+                      {jupiterDefiJlpQty.toLocaleString(undefined, { maximumFractionDigits: 2 })} JLP × $
+                      {jupiterDefiJlpPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-1.5 pt-1.5 border-t border-white/[0.06] flex justify-between text-[10px] font-mono text-ink-400">
+                  <span>합계</span>
+                  <span className="text-white tabular-nums">${formatUsdCompact(totalValuationPlusWallet)}</span>
+                </div>
+              </div>
             </div>
             <div className="kpi-chip">
               <span className="metric-label">uPNL</span>
@@ -1857,7 +2193,7 @@ export default function App() {
               {allWalletsOverview ? (
                 <KpiDualMoney usd={allWalletsOverview.totalUsdt} rate={usdKrwRate} />
               ) : (
-                <span className="text-sm font-mono text-white tabular-nums">
+                <span className="text-[16.1px] font-mono text-white tabular-nums">
                   {allWalletsError ? '—' : '…'}
                 </span>
               )}
@@ -1982,6 +2318,137 @@ export default function App() {
                 )}
               </div>
             </div>
+            <div
+              ref={jupiterChipRef}
+              className={`kpi-chip relative group cursor-pointer select-none min-w-[110px] ${jupiterOpen ? 'border-accent/40' : ''}`}
+              onClick={() => setJupiterOpen((open) => !open)}
+              title="Jupiter API 순자산은 Exposed와 시나리오에 포함됩니다. 별도 JLP는 포지션이라 순자산에서 제외합니다."
+            >
+              <span className="metric-label">Jupiter</span>
+              {jupiterPortfolio ? (
+                <KpiDualMoney usd={jupiterPortfolio.totalUsd} rate={usdKrwRate} />
+              ) : (
+                <span className="text-[16.1px] font-mono text-white tabular-nums">
+                  {jupiterError ? '—' : '…'}
+                </span>
+              )}
+              <div
+                className={`absolute right-0 top-full z-[60] mt-1.5 w-[min(380px,calc(100vw-2rem))] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
+                  jupiterOpen ? 'block pointer-events-auto' : 'hidden pointer-events-none group-hover:block'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">
+                    Jupiter (USD)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="text-[10px] text-accent hover:underline disabled:opacity-40"
+                      disabled={jupiterLoading}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void fetchJupiterPortfolio({ force: true });
+                      }}
+                    >
+                      {jupiterLoading ? '로딩…' : '새로고침'}
+                    </button>
+                    {jupiterOpen && (
+                      <button
+                        type="button"
+                        className="text-[10px] text-ink-500 hover:text-white"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setJupiterOpen(false);
+                        }}
+                      >
+                        닫기
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {jupiterPortfolio?.address && (
+                  <a
+                    href={`https://jup.ag/portfolio/${jupiterPortfolio.address}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mb-1.5 block text-[10px] font-mono text-ink-500 hover:text-accent truncate"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {jupiterPortfolio.address}
+                  </a>
+                )}
+                <div className="space-y-1.5 max-h-[min(360px,50vh)] overflow-y-auto custom-scrollbar overscroll-contain">
+                  {(jupiterPortfolio?.groups || []).map((group) => {
+                    const open = expandedJupiterGroup === group.id;
+                    return (
+                      <div key={group.id} className="rounded-lg border border-white/[0.05] overflow-hidden">
+                        <button
+                          type="button"
+                          className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[11px] font-mono hover:bg-white/[0.03]"
+                          onClick={() =>
+                            setExpandedJupiterGroup((cur) => (cur === group.id ? null : group.id))
+                          }
+                        >
+                          <span className="text-ink-300">{group.name}</span>
+                          <span className="text-accent tabular-nums">${formatUsdCompact(group.usd)}</span>
+                        </button>
+                        {open && (
+                          <ul className="px-2 pb-1.5 space-y-0.5 border-t border-white/[0.04]">
+                            {group.rows.slice(0, 40).map((row, idx) => (
+                              <li
+                                key={`${group.id}-${row.side}-${row.symbol}-${idx}`}
+                                className="grid grid-cols-[1fr_auto_auto] gap-x-2 text-[10px] font-mono py-0.5"
+                              >
+                                <span className="text-ink-400 truncate">
+                                  {row.side === 'supply'
+                                    ? '공급 '
+                                    : row.side === 'borrow'
+                                      ? '대출 '
+                                      : row.side === 'reward'
+                                        ? '보상 '
+                                        : row.side === 'stake'
+                                          ? '스테이크 '
+                                          : ''}
+                                  {row.symbol}
+                                </span>
+                                <span className="text-ink-300 tabular-nums text-right">
+                                  {Math.abs(row.qty) >= 1
+                                    ? row.qty.toLocaleString(undefined, { maximumFractionDigits: 4 })
+                                    : row.qty.toPrecision(4)}
+                                </span>
+                                <span className="text-white tabular-nums text-right w-[72px]">
+                                  ${formatUsdCompact(row.usd)}
+                                </span>
+                              </li>
+                            ))}
+                            {group.rows.length === 0 && (
+                              <li className="text-[10px] text-ink-600 py-1">세부 없음</li>
+                            )}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {!jupiterPortfolio && !jupiterError && (
+                    <p className="text-[11px] text-ink-500 py-2">불러오는 중…</p>
+                  )}
+                </div>
+                <div className="mt-1.5 pt-1.5 border-t border-white/[0.06] flex justify-between text-[10px] font-mono text-ink-400">
+                  <span>순자산</span>
+                  <span className="text-white tabular-nums">
+                    ${formatUsdCompact(jupiterPortfolio?.totalUsd ?? 0)}
+                  </span>
+                </div>
+                <p className="mt-1 text-[9px] text-ink-600 leading-snug">
+                  솔라나 순자산은 Exposed와 시나리오에 포함됩니다. 별도 JLP는 포지션이라 순자산에서 뺍니다. 스테이블은 고정, 그 외·대출은 Δ%로 재평가합니다.
+                </p>
+                {jupiterError && (
+                  <p className="mt-1 text-[9px] text-danger leading-snug">{jupiterError}</p>
+                )}
+              </div>
+            </div>
             <div className="kpi-chip">
               <span className="metric-label">Position</span>
               <KpiDualMoney usd={totalExposure} rate={usdKrwRate} />
@@ -2079,7 +2546,7 @@ export default function App() {
             </div>
             <div className="kpi-chip hidden sm:flex">
               <span className="metric-label">Pos / Ord</span>
-              <span className="text-sm font-mono text-white tabular-nums">{positions.length} / {openOrders.length}</span>
+              <span className="text-[16.1px] font-mono text-white tabular-nums">{positions.length} / {openOrders.length}</span>
             </div>
           </div>
 
@@ -2116,7 +2583,7 @@ export default function App() {
               {liquidationPriceEstimate && (
                 <div className="kpi-chip border-danger/25 bg-danger/5">
                   <span className="metric-label text-danger">Est. Liq ({activeSymbol})</span>
-                  <span className="text-sm font-mono text-danger tabular-nums">
+                  <span className="text-[16.1px] font-mono text-danger tabular-nums">
                     ${liquidationPriceEstimate.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                   </span>
                 </div>
@@ -2475,7 +2942,7 @@ export default function App() {
                 <thead>
                   <tr className="text-ink-400 border-b border-white/[0.06]">
                     <th className="py-2 font-medium">Δ%</th>
-                    <th className="py-2 font-medium">평가액</th>
+                    <th className="py-2 font-medium">순자산</th>
                     <th className="py-2 font-medium">Cushion</th>
                     <th className="py-2 font-medium">M.Ratio</th>
                   </tr>
@@ -2510,22 +2977,33 @@ export default function App() {
               </table>
             </div>
             <ul className="mt-3 text-[10px] text-ink-400 space-y-1 leading-relaxed">
-              <li>Δ% 시 포지션 마크·uPnL·유지증거금 + 비스테이블 담보를 같이 반영</li>
-              <li>평가액: (USD-M + Spot·Funding·Earn 등) 시나리오 담보 + 선물 uPnL</li>
-              <li>Cushion: (평가액 − 유지증거금) ÷ |순노출| · 청산 시 0%</li>
-              <li>청산(포트폴리오 관점): 평가액 ≤ 유지증거금 또는 M.Ratio ≥ 100%</li>
+              <li>Δ% 시 포지션 마크·uPnL·유지증거금 + 비스테이블 담보(Jupiter 포함)를 같이 반영</li>
+              <li>순자산: (USD-M + Spot·Funding·Earn + Jupiter API 순자산) + 선물 uPnL. 별도 JLP 포지션은 제외</li>
+              <li>Cushion: (순자산 − 유지증거금) ÷ |순노출| · 청산 시 0%</li>
+              <li>청산(포트폴리오 관점): 순자산 ≤ 유지증거금 또는 M.Ratio ≥ 100%</li>
               <li>
                 담보 합 $
                 {scenarioCollateral.totalWallet.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                 {' '}(USD-M $
                 {scenarioCollateral.futuresWallet.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                {scenarioCollateral.includesOtherWallets
-                  ? ` + 기타 $${scenarioCollateral.extraWallet.toLocaleString(undefined, {
-                      maximumFractionDigits: 0,
-                    })}`
-                  : allWalletsDetails
-                    ? ''
-                    : ' · 기타지갑 로딩/권한 대기'}
+                {(() => {
+                  const otherExtra = scenarioCollateral.extraWallet - (scenarioCollateral.jupiterUsd || 0);
+                  const parts: string[] = [];
+                  if (otherExtra > 0.5) {
+                    parts.push(
+                      ` + 기타 $${otherExtra.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                    );
+                  }
+                  if (scenarioCollateral.jupiterUsd) {
+                    parts.push(
+                      ` + Jupiter $${scenarioCollateral.jupiterUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                    );
+                  } else if (!jupiterPortfolio) {
+                    parts.push(' · Jupiter 대기');
+                  }
+                  if (!parts.length && !allWalletsDetails) parts.push(' · 기타지갑 로딩/권한 대기');
+                  return parts.join('');
+                })()}
                 )
               </li>
               <li>
@@ -2559,12 +3037,22 @@ export default function App() {
           <section className="col-span-12 lg:col-span-6 xl:col-span-4 panel p-5 flex flex-col gap-3">
             <div className="metric-label flex items-center gap-1.5"><Settings size={11} /> Manual order</div>
             <div className="flex flex-wrap gap-2">
-              <input
+              <select
                 value={manualOrderSymbol}
-                onChange={e => setManualOrderSymbol(e.target.value.toUpperCase())}
-                className="flex-1 min-w-[100px] bg-ink-950 border border-white/[0.08] rounded-lg px-3 py-2 text-sm font-mono text-white outline-none focus:border-accent/40"
-                placeholder="BTCUSDT"
-              />
+                onChange={e => setManualOrderSymbol(e.target.value)}
+                className="flex-1 min-w-[140px] bg-ink-950 border border-white/[0.08] rounded-lg px-2 py-2 text-sm font-mono text-white outline-none focus:border-accent/40"
+              >
+                <optgroup label="보유 · 관심">
+                  {manualSymbolGroups.pinned.map(symbol => (
+                    <option key={`pin-${symbol}`} value={symbol}>{symbol}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="USDT 무기한">
+                  {manualSymbolGroups.rest.map(symbol => (
+                    <option key={symbol} value={symbol}>{symbol}</option>
+                  ))}
+                </optgroup>
+              </select>
               <select
                 value={manualOrderSide}
                 onChange={e => setManualOrderSide(e.target.value as 'BUY' | 'SELL')}
