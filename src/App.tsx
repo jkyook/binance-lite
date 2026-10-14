@@ -336,20 +336,14 @@ export default function App() {
 
   const [bulkOrderResults, setBulkOrderResults] = useState<{ symbol: string, side: string, quantity: string, price?: string, status: 'success' | 'fail', error?: string }[] | null>(null);
   const [manualOrderSymbol, setManualOrderSymbol] = useState('BTCUSDT');
-  const manualSymbolGroups = useMemo(() => {
-    const pinned = Array.from(new Set([
-      ...positions.map(p => p.symbol),
-      ...SYMBOLS,
-      manualOrderSymbol,
-    ].filter(Boolean)));
-    const pinnedSet = new Set(pinned);
-    const rest = (exchangeInfo?.symbols || [])
-      .filter((s: any) => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && String(s.symbol || '').endsWith('USDT'))
-      .map((s: any) => String(s.symbol))
-      .filter((symbol: string) => !pinnedSet.has(symbol));
-    rest.sort();
-    return { pinned, rest };
-  }, [exchangeInfo, positions, manualOrderSymbol]);
+  const heldSymbols = useMemo(
+    () => Array.from(new Set(positions.map(p => p.symbol).filter(Boolean))).sort(),
+    [positions],
+  );
+  useEffect(() => {
+    if (!heldSymbols.length) return;
+    if (!heldSymbols.includes(manualOrderSymbol)) setManualOrderSymbol(heldSymbols[0]);
+  }, [heldSymbols, manualOrderSymbol]);
   const [manualOrderQty, setManualOrderQty] = useState('0.001');
   const [manualOrderSide, setManualOrderSide] = useState<'BUY' | 'SELL'>('BUY');
   const [submittingManualOrder, setSubmittingManualOrder] = useState(false);
@@ -3210,20 +3204,16 @@ export default function App() {
             <div className="metric-label flex items-center gap-1.5"><Settings size={11} /> Manual order</div>
             <div className="flex flex-wrap gap-2">
               <select
-                value={manualOrderSymbol}
+                value={heldSymbols.includes(manualOrderSymbol) ? manualOrderSymbol : (heldSymbols[0] || '')}
                 onChange={e => setManualOrderSymbol(e.target.value)}
-                className="flex-1 min-w-[140px] bg-ink-950 border border-white/[0.08] rounded-lg px-2 py-2 text-sm font-mono text-white outline-none focus:border-accent/40"
+                disabled={heldSymbols.length === 0}
+                className="flex-1 min-w-[140px] bg-ink-950 border border-white/[0.08] rounded-lg px-2 py-2 text-sm font-mono text-white outline-none focus:border-accent/40 disabled:opacity-50"
               >
-                <optgroup label="보유 · 관심">
-                  {manualSymbolGroups.pinned.map(symbol => (
-                    <option key={`pin-${symbol}`} value={symbol}>{symbol}</option>
-                  ))}
-                </optgroup>
-                <optgroup label="USDT 무기한">
-                  {manualSymbolGroups.rest.map(symbol => (
-                    <option key={symbol} value={symbol}>{symbol}</option>
-                  ))}
-                </optgroup>
+                {heldSymbols.length === 0 ? (
+                  <option value="">보유 종목 없음</option>
+                ) : heldSymbols.map(symbol => (
+                  <option key={symbol} value={symbol}>{symbol}</option>
+                ))}
               </select>
               <select
                 value={manualOrderSide}
@@ -3241,7 +3231,7 @@ export default function App() {
               />
               <button
                 onClick={executeManualOrder}
-                disabled={submittingManualOrder}
+                disabled={submittingManualOrder || !heldSymbols.includes(manualOrderSymbol)}
                 className="px-4 py-2 rounded-lg bg-accent text-ink-950 text-xs font-semibold disabled:opacity-50"
               >
                 {submittingManualOrder ? '…' : 'Execute'}
