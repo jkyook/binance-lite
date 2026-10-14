@@ -131,7 +131,7 @@ export default function App() {
   const [activeSymbol, setActiveSymbol] = useState('BTCUSDT');
   const [aiProvider, setAiProvider] = useState<AiProvider>('grok');
   const [isAnalysing, setIsAnalysing] = useState(false);
-  const [aiChatOpen, setAiChatOpen] = useState(true);
+  const [aiChatOpen, setAiChatOpen] = useState(false);
   const [aiChatInput, setAiChatInput] = useState('');
   const [aiChatBusy, setAiChatBusy] = useState(false);
   const [aiChatMessages, setAiChatMessages] = useState<AiChatMessage[]>([]);
@@ -315,6 +315,35 @@ export default function App() {
     }
     
     return formatted;
+  };
+
+  const ceilToStep = (quantity: number, stepSize: string) => {
+    const step = parseFloat(stepSize);
+    if (!(step > 0) || !(quantity > 0)) return '';
+    const trimmed = String(stepSize).replace(/0+$/, '');
+    const decimals = trimmed.includes('.') ? (trimmed.split('.')[1] || '').length : 0;
+    const steps = Math.ceil(quantity / step - 1e-10);
+    return (steps * step).toFixed(decimals);
+  };
+
+  // 보유 비율이 최소 수량·최소 주문금액보다 작으면 주문 가능한 최소 수량으로 올린다.
+  const bulkQuantity = (symbol: string, rawQty: number, price: string) => {
+    const symInfo = exchangeInfo?.symbols?.find((s: any) => s.symbol === symbol);
+    const lot = symInfo?.filters?.find((f: any) => f.filterType === 'LOT_SIZE');
+    const notionalFilter = symInfo?.filters?.find((f: any) => f.filterType === 'MIN_NOTIONAL' || f.filterType === 'NOTIONAL');
+    const minQty = parseFloat(lot?.minQty || '0');
+    const minNotional = parseFloat(notionalFilter?.notional || notionalFilter?.minNotional || '0');
+    const px = parseFloat(price);
+    let need = rawQty;
+    if (minQty > need) need = minQty;
+    if (minNotional > 0 && px > 0 && minNotional / px > need) need = minNotional / px;
+    if (!lot?.stepSize) return formatQuantity(symbol, need);
+    let qty = ceilToStep(need, String(lot.stepSize));
+    const step = parseFloat(lot.stepSize);
+    if (minNotional > 0 && px > 0 && step > 0 && parseFloat(qty) * px < minNotional) {
+      qty = ceilToStep(parseFloat(qty) + step, String(lot.stepSize));
+    }
+    return qty;
   };
 
   const alignToStep = (raw: string, step: string) => {
@@ -1526,14 +1555,14 @@ export default function App() {
         }
 
         const heldQty = Math.abs(parseFloat(pos.positionAmt));
-        const fmtQuantity = formatQuantity(symbol, heldQty * positionFraction);
         const price = touchPrice(book, symbol, side);
-        if (!(parseFloat(fmtQuantity) > 0)) {
-          results.push({ symbol, side, quantity: '0', status: 'fail', error: 'Quantity too small' });
+        if (!price) {
+          results.push({ symbol, side, quantity: '0', status: 'fail', error: '1호가 없음' });
           continue;
         }
-        if (!price) {
-          results.push({ symbol, side, quantity: fmtQuantity, status: 'fail', error: '1호가 없음' });
+        const fmtQuantity = bulkQuantity(symbol, heldQty * positionFraction, price);
+        if (!(parseFloat(fmtQuantity) > 0)) {
+          results.push({ symbol, side, quantity: '0', status: 'fail', error: 'Quantity too small' });
           continue;
         }
 
