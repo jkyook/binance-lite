@@ -380,6 +380,7 @@ export default function App() {
     if (!heldSymbols.includes(manualOrderSymbol)) setManualOrderSymbol(heldSymbols[0]);
   }, [heldSymbols, manualOrderSymbol]);
   const [manualOrderQty, setManualOrderQty] = useState('0.001');
+  const [manualOrderPrice, setManualOrderPrice] = useState('');
   const [manualOrderSide, setManualOrderSide] = useState<'BUY' | 'SELL'>('BUY');
   const [submittingManualOrder, setSubmittingManualOrder] = useState(false);
   const [debugLog, setDebugLog] = useState<{ msg: string, time: string }[]>([]);
@@ -1374,18 +1375,31 @@ export default function App() {
       alert('수량을 확인해 주세요.');
       return;
     }
+    // 가격 입력칸에 숫자가 있으면 그 지정가로, 비어 있으면 기존처럼 1호가로 주문
+    const typedPrice = manualOrderPrice.trim();
+    if (typedPrice && !(Number(typedPrice) > 0)) {
+      alert('주문가격을 확인해 주세요. (비우면 1호가)');
+      return;
+    }
     setSubmittingManualOrder(true);
-    addLog(`Manual Order Start: ${manualOrderSide} ${quantity} ${symbol} @ best ${manualOrderSide === 'BUY' ? 'bid' : 'ask'}`);
+    addLog(`Manual Order Start: ${manualOrderSide} ${quantity} ${symbol} @ ${typedPrice || `best ${manualOrderSide === 'BUY' ? 'bid' : 'ask'}`}`);
     try {
-      const book = await loadBook(symbol);
-      const price = touchPrice(book, symbol, manualOrderSide);
+      let price: string;
+      let priceLabel: string;
+      if (typedPrice) {
+        price = formatLimitPrice(symbol, typedPrice);
+        priceLabel = '입력 지정가';
+      } else {
+        const book = await loadBook(symbol);
+        price = touchPrice(book, symbol, manualOrderSide);
+        priceLabel = manualOrderSide === 'BUY' ? '매수1호가' : '매도1호가';
+      }
       if (!price) {
-        addLog('FAILED: 1호가를 가져오지 못했습니다.');
-        alert(`${symbol} 1호가를 가져오지 못했습니다.`);
+        addLog('FAILED: 주문가격을 정하지 못했습니다.');
+        alert(`${symbol} 주문가격을 정하지 못했습니다.`);
         return;
       }
-      const touchLabel = manualOrderSide === 'BUY' ? '매수1호가' : '매도1호가';
-      if (!window.confirm(`${manualOrderSide} ${quantity} ${symbol} @ ${price} (${touchLabel} 지정가) 주문을 실행합니다. 진행할까요?`)) return;
+      if (!window.confirm(`${manualOrderSide} ${quantity} ${symbol} @ ${price} (${priceLabel}) 주문을 실행합니다. 진행할까요?`)) return;
 
       const payload = {
         symbol,
@@ -3308,6 +3322,13 @@ export default function App() {
                 onChange={e => setManualOrderQty(e.target.value)}
                 className="w-24 bg-ink-950 border border-white/[0.08] rounded-lg px-3 py-2 text-sm font-mono text-white outline-none focus:border-accent/40"
                 placeholder="Qty"
+              />
+              <input
+                value={manualOrderPrice}
+                onChange={e => setManualOrderPrice(e.target.value)}
+                className="w-28 bg-ink-950 border border-white/[0.08] rounded-lg px-3 py-2 text-sm font-mono text-white outline-none focus:border-accent/40"
+                placeholder="Price (빈칸=1호가)"
+                inputMode="decimal"
               />
               <button
                 onClick={executeManualOrder}
