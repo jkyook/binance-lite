@@ -208,6 +208,18 @@ export class BinanceService {
     return response.json();
   }
 
+  static async getTradingStatus(): Promise<{
+    restricted: boolean;
+    restrictedUntil: number;
+    binance: any;
+    binanceLocked?: boolean;
+    binanceError?: string;
+  }> {
+    const response = await fetch('/api/futures/trading-status');
+    if (!response.ok) throw new Error('Failed to fetch trading status');
+    return response.json();
+  }
+
   static async cancelFuturesOrder(symbol: string, orderId: number): Promise<any> {
     const response = await fetch('/api/futures/cancel-order', {
       method: 'POST',

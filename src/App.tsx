@@ -121,6 +121,9 @@ const KpiDualMoney = ({
 const isRateLimitError = (msg?: string | null) =>
   !!msg && /ip ban|banned until|rate limit|418|-1003|too many requests/i.test(msg);
 
+const isQuantRuleMessage = (msg?: string | null) =>
+  !!msg && /-4400|Quantitative Rules|reduceOnly 주문만/i.test(msg);
+
 const historyRangeLabel = (days: number) => (days === 92 ? '3M' : `${days}D`);
 
 type IncomeListFilter = 'ALL' | 'REALIZED_PNL' | 'FUNDING_FEE' | 'COMMISSION';
@@ -211,6 +214,8 @@ export default function App() {
   const [showScenarios, setShowScenarios] = useState(false);
   const [orderPercent, setOrderPercent] = useState(0.1);
   const [bulkAllPositions, setBulkAllPositions] = useState(false);
+  const [bulkReduceOnly, setBulkReduceOnly] = useState(false);
+  const [tradingStatus, setTradingStatus] = useState<{ restricted: boolean; restrictedUntil: number; binanceLocked?: boolean; binance?: any } | null>(null);
   const [usdKrwRate, setUsdKrwRate] = useState<number | null>(null);
   const [serverIp, setServerIp] = useState<string | null>(null);
   const [sendingTelegram, setSendingTelegram] = useState(false);
@@ -1498,6 +1503,22 @@ export default function App() {
     }
   };
 
+  const refreshTradingStatus = async () => {
+    try {
+      const st = await BinanceService.getTradingStatus();
+      setTradingStatus(st);
+      return st;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    void refreshTradingStatus();
+    const t = setInterval(() => { void refreshTradingStatus(); }, 300_000);
+    return () => clearInterval(t);
+  }, []);
+
   const handleBulkOrder = async (side: 'BUY' | 'SELL', onlyType: 'LONG' | 'SHORT') => {
     if (isAnalysing) return;
 
@@ -1524,6 +1545,13 @@ export default function App() {
       : `${onlyType} ${targets.length}개`;
     const etaSec = Math.ceil((targets.length * BULK_ORDER_GAP_MS) / 1000);
     if (!confirm(`${scopeLabel}에 각각 보유 수량의 ${orderPercent}% ${side === 'BUY' ? '롱' : '숏'}을 ${touchLabel} 지정가로 넣습니다. 1 ETH면 ${positionFraction.toFixed(4)} ETH. 주문 간격 ${BULK_ORDER_GAP_MS}ms (약 ${etaSec}초). 진행할까요?`)) {
+      return;
+    }
+
+    const st = await refreshTradingStatus();
+    if ((st?.restricted || st?.binanceLocked) && !bulkReduceOnly) {
+      const until = st.restrictedUntil ? new Date(st.restrictedUntil).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) + ' KST' : '해제 시각 미확인';
+      alert(`정량적 거래 규칙 제한 중입니다 (${until}). 신규/증가 주문은 차단되며 reduceOnly(감축) 주문만 가능합니다.`);
       return;
     }
 
@@ -1555,7 +1583,11 @@ export default function App() {
         }
 
         const heldQty = Math.abs(parseFloat(pos.positionAmt));
-        const price = touchPrice(book, symbol, side);
+        // reduceOnly면 포지션 반대 방향(롱→SELL, 숏→BUY)으로 감축
+        const orderSide: 'BUY' | 'SELL' = bulkReduceOnly
+          ? (parseFloat(pos.positionAmt) > 0 ? 'SELL' : 'BUY')
+          : side;
+        const price = touchPrice(book, symbol, orderSide);
         if (!price) {
           results.push({ symbol, side, quantity: '0', status: 'fail', error: '1호가 없음' });
           continue;
@@ -1569,10 +1601,11 @@ export default function App() {
         try {
           const res = await BinanceService.authorizedOrder('/api/futures/order', {
             symbol,
-            side,
+            side: orderSide,
             type: 'LIMIT',
             quantity: fmtQuantity,
             price,
+            ...(bulkReduceOnly ? { reduceOnly: true } : {}),
           });
           const text = await res.text();
           if (!res.ok) {
@@ -1585,10 +1618,11 @@ export default function App() {
               /* raw text */
             }
             results.push({ symbol, side, quantity: fmtQuantity, price, status: 'fail', error: errorMessage });
-            if (/ban|429|418|-1003|too many/i.test(errorMessage)) {
+            if (/ban|429|418|-1003|too many/i.test(errorMessage) || isQuantRuleMessage(errorMessage)) {
               for (let j = i + 1; j < targets.length; j++) {
-                results.push({ symbol: targets[j].symbol, side, quantity: '?', status: 'fail', error: '중단: API 제한' });
+                results.push({ symbol: targets[j].symbol, side, quantity: '?', status: 'fail', error: isQuantRuleMessage(errorMessage) ? '중단: -4400 거래 제한' : '중단: API 제한' });
               }
+              if (isQuantRuleMessage(errorMessage)) void refreshTradingStatus();
               break;
             }
           } else {
@@ -1948,6 +1982,21 @@ export default function App() {
               onChange={(e) => setOrderPercent(parseFloat(e.target.value))}
               className="w-full h-1.5 bg-ink-700 rounded-full appearance-none cursor-pointer accent-[var(--color-accent)] mb-3"
             />
+            {(tradingStatus?.restricted || tradingStatus?.binanceLocked) && (
+              <div className="mb-2 rounded-lg border border-danger/30 bg-danger/10 p-2 text-[10px] leading-snug text-danger">
+                거래 제한(-4400): reduceOnly만 허용
+                {tradingStatus.restrictedUntil ? ` · ~${new Date(tradingStatus.restrictedUntil).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' })} KST` : ''}
+              </div>
+            )}
+            <label className="mb-2 flex items-start gap-2 text-[10px] leading-snug text-ink-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={bulkReduceOnly}
+                onChange={(e) => setBulkReduceOnly(e.target.checked)}
+                className="mt-0.5 accent-[var(--color-accent)]"
+              />
+              <span>reduceOnly 감축. 체크 시 방향이 반대로 바뀌어(롱→매도1호가 SELL, 숏→매수1호가 BUY) 포지션을 줄입니다. 제한 중에도 가능.</span>
+            </label>
             <label className="mb-2 flex items-start gap-2 text-[10px] leading-snug text-ink-300 cursor-pointer">
               <input
                 type="checkbox"

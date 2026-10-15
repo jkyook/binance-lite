@@ -140,6 +140,40 @@ function persistBanUntil(until: number) {
 }
 
 let binanceBanUntil = readPersistedBanUntil();
+
+// 정량적 거래 규칙(-4400) 제한: 신규 진입 주문 차단, reduceOnly만 허용.
+const QUANT_RESTRICT_SHORT_MS = 5 * 60 * 1000;
+const QUANT_RESTRICT_REPEAT_MS = 2 * 60 * 60 * 1000;
+let tradingRestrictedUntil = 0;
+let lastQuantViolationAt = 0;
+
+function isReduceOnly(v: unknown): boolean {
+  return v === true || (typeof v === "string" && v.toLowerCase() === "true");
+}
+
+function isQuantRuleError(code: unknown, msg: unknown): boolean {
+  return code === -4400 || (typeof msg === "string" && /Quantitative Rules/i.test(msg));
+}
+
+function markQuantRestriction(): number {
+  const now = Date.now();
+  // 24h 내 반복 위반이면 2시간, 아니면 5분(바이낸스 공식 안내 기준)
+  const repeated = lastQuantViolationAt > 0 && now - lastQuantViolationAt < 24 * 60 * 60 * 1000;
+  lastQuantViolationAt = now;
+  tradingRestrictedUntil = now + (repeated ? QUANT_RESTRICT_REPEAT_MS : QUANT_RESTRICT_SHORT_MS);
+  return tradingRestrictedUntil;
+}
+
+function quantRestrictionError(): Error & Record<string, unknown> {
+  const untilText = new Date(tradingRestrictedUntil).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+  const error: any = new Error(
+    `[-4400] Futures Trading Quantitative Rules 제한 중: ${untilText} KST까지 reduceOnly 주문만 허용됩니다. 신규/증가 주문 재시도를 차단했습니다.`
+  );
+  error.status = 423;
+  error.code = -4400;
+  error.restrictedUntil = tradingRestrictedUntil;
+  return error;
+}
 if (binanceBanUntil > Date.now()) {
   console.warn(
     "[Server Init] Binance IP ban until",
@@ -499,6 +533,8 @@ async function startServer() {
     res.status(status).json({
       error: err?.message || "API request failed",
       ...(err?.banUntil ? { banUntil: err.banUntil } : {}),
+      ...(err?.code ? { code: err.code } : {}),
+      ...(err?.restrictedUntil ? { restrictedUntil: err.restrictedUntil } : {}),
     });
   };
 
@@ -720,6 +756,23 @@ async function startServer() {
     }
   });
 
+  apiRouter.get("/futures/trading-status", async (_req, res) => {
+    const local = {
+      restricted: Date.now() < tradingRestrictedUntil,
+      restrictedUntil: tradingRestrictedUntil > Date.now() ? tradingRestrictedUntil : 0,
+    };
+    try {
+      const data = await binanceRequest("/fapi/v1/apiTradingStatus");
+      const symbolRestricted = data?.indicators
+        ? Object.values(data.indicators).some((arr: any) => Array.isArray(arr) && arr.some((i: any) => i?.isLocked))
+        : false;
+      res.json({ ...local, binance: data, binanceLocked: !!data?.isLocked || symbolRestricted });
+    } catch (err: any) {
+      // 상태 조회 실패는 로컬 상태만 돌려준다 (UI 폴링이 에러로 번지지 않게)
+      res.json({ ...local, binance: null, binanceError: err?.message });
+    }
+  });
+
   apiRouter.post("/futures/batch-order", async (req, res) => {
     if (!requireOrderPin(req, res)) return;
     console.log("[Route Hit] POST /api/futures/batch-order");
@@ -730,6 +783,9 @@ async function startServer() {
       return;
     }
     try {
+      if (Date.now() < tradingRestrictedUntil && !parsed.data.orders.every(o => isReduceOnly(o.reduceOnly))) {
+        throw quantRestrictionError();
+      }
       const normalizedOrders = parsed.data.orders.map(o => {
         const out: Record<string, unknown> = {
           symbol: o.symbol,
@@ -748,6 +804,10 @@ async function startServer() {
       };
 
       const data = await binanceRequest("/fapi/v1/batchOrders", "POST", params);
+      // batchOrders는 HTTP 200이어도 항목별 {code,msg}로 -4400이 올 수 있다.
+      if (Array.isArray(data) && data.some((r: any) => isQuantRuleError(r?.code, r?.msg))) {
+        markQuantRestriction();
+      }
       res.json(data);
     } catch (err: any) {
       console.error("[Batch Order Error]", err.message);
@@ -766,6 +826,9 @@ async function startServer() {
     }
     try {
       const { symbol, side, type, quantity, reduceOnly, price } = parsed.data;
+      if (Date.now() < tradingRestrictedUntil && !isReduceOnly(reduceOnly)) {
+        throw quantRestrictionError();
+      }
       const params: Record<string, string> = {
         symbol,
         side,
@@ -1441,6 +1504,13 @@ async function startServer() {
         const error: any = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
         error.status = response.status === 418 || response.status === 429 ? 429 : response.status;
         if (binanceBanUntil > Date.now()) error.banUntil = binanceBanUntil;
+        if (isQuantRuleError(responseData.code, responseData.msg)) {
+          const until = markQuantRestriction();
+          const untilText = new Date(until).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+          error.message = `[-4400] ${responseData.msg || "Quantitative Rules violated"} — ${untilText} KST까지 신규 주문을 차단합니다(reduceOnly만 허용).`;
+          error.code = -4400;
+          error.restrictedUntil = until;
+        }
         throw error;
       }
 
