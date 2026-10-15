@@ -10,3 +10,4 @@ coverage/
 data/binance_ban_until
 .idea/
 .claude/
+data/quant_restriction.json
