@@ -144,8 +144,38 @@ let binanceBanUntil = readPersistedBanUntil();
 // 정량적 거래 규칙(-4400) 제한: 신규 진입 주문 차단, reduceOnly만 허용.
 const QUANT_RESTRICT_SHORT_MS = 5 * 60 * 1000;
 const QUANT_RESTRICT_REPEAT_MS = 2 * 60 * 60 * 1000;
-let tradingRestrictedUntil = 0;
-let lastQuantViolationAt = 0;
+const QUANT_FILE = path.join(process.cwd(), "data", "quant_restriction.json");
+
+function readQuantState(): { until: number; last: number; pending: boolean } {
+  try {
+    if (fs.existsSync(QUANT_FILE)) {
+      const j = JSON.parse(fs.readFileSync(QUANT_FILE, "utf8"));
+      return { until: Number(j.until) || 0, last: Number(j.last) || 0, pending: !!j.pending };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { until: 0, last: 0, pending: false };
+}
+
+function persistQuantState() {
+  try {
+    fs.mkdirSync(path.dirname(QUANT_FILE), { recursive: true });
+    fs.writeFileSync(
+      QUANT_FILE,
+      JSON.stringify({ until: tradingRestrictedUntil, last: lastQuantViolationAt, pending: quantPending }),
+      "utf8"
+    );
+  } catch (e) {
+    console.warn("[Quant] persist failed:", (e as Error).message);
+  }
+}
+
+const quantInit = readQuantState();
+let tradingRestrictedUntil = quantInit.until;
+let lastQuantViolationAt = quantInit.last;
+// 해제 감시 대상 여부(제한이 걸린 뒤 아직 해제 확인·알림 전)
+let quantPending = quantInit.pending;
 
 function isReduceOnly(v: unknown): boolean {
   return v === true || (typeof v === "string" && v.toLowerCase() === "true");
@@ -161,6 +191,8 @@ function markQuantRestriction(): number {
   const repeated = lastQuantViolationAt > 0 && now - lastQuantViolationAt < 24 * 60 * 60 * 1000;
   lastQuantViolationAt = now;
   tradingRestrictedUntil = now + (repeated ? QUANT_RESTRICT_REPEAT_MS : QUANT_RESTRICT_SHORT_MS);
+  quantPending = true;
+  persistQuantState();
   return tradingRestrictedUntil;
 }
 
@@ -1571,6 +1603,47 @@ async function startServer() {
 
   // LAN 노출 방지: 기본은 loopback만 바인딩, 의도적으로 외부 공개할 때만 LISTEN_HOST 설정
   const host = process.env.LISTEN_HOST || "127.0.0.1";
+
+  // 제한 해제 감시: 걸려 있는 동안만 1분 주기로 확인, 시작/해제를 텔레그램으로 알린다.
+  let quantNotifiedUntil = quantPending ? tradingRestrictedUntil : 0;
+  const kst = (ms: number) => new Date(ms).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+  const notifyTelegram = async (text: string) => {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    try {
+      await telegramRequest("sendMessage", { chat_id: TELEGRAM_CHAT_ID, text, disable_web_page_preview: true });
+    } catch (e: any) {
+      console.warn("[Quant] telegram notify failed:", e?.message);
+    }
+  };
+  const quantWatchTick = async () => {
+    if (!quantPending) return;
+    const now = Date.now();
+    if (quantNotifiedUntil !== tradingRestrictedUntil) {
+      quantNotifiedUntil = tradingRestrictedUntil;
+      void notifyTelegram(`⚠️ [binance-lite] 선물 정량적 거래 규칙(-4400) 제한 감지. ${kst(tradingRestrictedUntil)} KST까지 신규 주문 차단(reduceOnly만 허용).`);
+    }
+    if (now < tradingRestrictedUntil) return;
+    try {
+      const data = await binanceRequest("/fapi/v1/apiTradingStatus");
+      const locked = !!data?.isLocked ||
+        (data?.indicators ? Object.values(data.indicators).some((arr: any) => Array.isArray(arr) && arr.some((i: any) => i?.isLocked)) : false);
+      if (locked) {
+        tradingRestrictedUntil = now + QUANT_RESTRICT_SHORT_MS;
+        quantNotifiedUntil = tradingRestrictedUntil;
+        persistQuantState();
+        console.log("[Quant] still locked per apiTradingStatus; extended to", kst(tradingRestrictedUntil));
+        return;
+      }
+      quantPending = false;
+      persistQuantState();
+      void notifyTelegram("✅ [binance-lite] 선물 거래 제한 해제 확인. 신규 주문 가능합니다.");
+      console.log("[Quant] restriction released");
+    } catch (e: any) {
+      console.warn("[Quant] status probe failed (will retry):", e?.message);
+    }
+  };
+  setInterval(() => { void quantWatchTick(); }, 60_000);
+
   app.listen(PORT, host, () => {
     console.log(`Server running on http://localhost:${PORT} (bound to ${host})`);
   });
