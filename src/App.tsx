@@ -385,8 +385,8 @@ export default function App() {
   const [submittingManualOrder, setSubmittingManualOrder] = useState(false);
   const [debugLog, setDebugLog] = useState<{ msg: string, time: string }[]>([]);
 
-  // Income 표시 기간 (7/30/90/3M). 3M은 Binance 보존 한계(약 3개월) 근사값 92일.
-  const [historyDays, setHistoryDays] = useState<number>(7);
+  // Income 표시 기간 (3/30/90/3M). 3M은 Binance 보존 한계(약 3개월) 근사값 92일.
+  const [historyDays, setHistoryDays] = useState<number>(3);
   const historyDaysRef = useRef(historyDays);
   useEffect(() => { historyDaysRef.current = historyDays; }, [historyDays]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -2985,7 +2985,7 @@ export default function App() {
 
             <div className="flex gap-1 mb-2 flex-wrap">
               {[
-                { days: 7, label: '7D' },
+                { days: 3, label: '3D' },
                 { days: 30, label: '30D' },
                 { days: 90, label: '90D' },
                 { days: 92, label: '3M' },
