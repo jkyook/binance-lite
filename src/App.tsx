@@ -23,6 +23,8 @@ import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+// 브라우저 탭 제목에 표시할 BTC 시세 (USDC 마켓)
+const TITLE_SYMBOL = 'BTCUSDC';
 // USD-M 주문 한도 300건/10초, 1200건/분. 450ms면 약 22건/10초라 한도에 닿지 않는다.
 // 호가 전체 조회(가중치 5)는 8건마다 다시 받아 1호가가 오래 묵지 않게 한다.
 const BULK_ORDER_GAP_MS = 450;
@@ -173,7 +175,7 @@ export default function App() {
   const [trades24hError, setTrades24hError] = useState<string | null>(null);
   const trades24hChipRef = useRef<HTMLDivElement | null>(null);
   const trades24hAtRef = useRef(0);
-  const TRADES_24H_GAP_MS = 120_000;
+  const TRADES_24H_GAP_MS = 300_000;
   const [jupiterPortfolio, setJupiterPortfolio] = useState<{
     address: string;
     totalUsd: number;
@@ -957,7 +959,7 @@ export default function App() {
 
   // 1. WebSocket Management
   useEffect(() => {
-    const symbolsToSubscribe = new Set([activeSymbol, ...SYMBOLS, ...positions.map(p => p.symbol)]);
+    const symbolsToSubscribe = new Set([activeSymbol, TITLE_SYMBOL, ...SYMBOLS, ...positions.map(p => p.symbol)]);
 
     // Teardown connections no longer needed
     Object.keys(wsRefs.current).forEach(symbol => {
@@ -999,7 +1001,7 @@ export default function App() {
     let cancelled = false;
 
     const pollActivePrice = async () => {
-      const symbols = Array.from(new Set([activeSymbol, 'BTCUSDT']));
+      const symbols = Array.from(new Set([activeSymbol, TITLE_SYMBOL]));
       await Promise.all(symbols.map(async (symbol) => {
         const price = await BinanceService.getPrice(symbol);
         if (cancelled || !price || price === '0') return;
@@ -1017,10 +1019,10 @@ export default function App() {
   }, [activeSymbol]);
 
   // Browser tab ticker — Binance-style live BTC last price in the document title
-  const btcLastPrice = stats['BTCUSDT']?.price;
+  const btcLastPrice = stats[TITLE_SYMBOL]?.price;
   useEffect(() => {
     const formatted = formatTickerPrice(btcLastPrice);
-    document.title = formatted ? `${formatted} | BTCUSDT | Binance Lite` : 'Binance Lite';
+    document.title = formatted ? `${formatted} | ${TITLE_SYMBOL} | Binance Lite` : 'Binance Lite';
   }, [btcLastPrice]);
 
   // 2. Initial Data Fetching

@@ -213,6 +213,135 @@ if (binanceBanUntil > Date.now()) {
     "KST (persisted)"
   );
 }
+// ── Binance REST 가중치 추적 · 자체 제한 ─────────────────────────────────────
+// fapi IP 한도는 분당 2400 weight. 한도에 닿기 전(RATE_SOFT_LIMIT)에 읽기 요청을 스스로 지연시켜
+// 418/-1003(IP 밴)을 피한다. 주문·취소(POST/DELETE)는 지연 없이 통과시킨다.
+type RateGroup = "fapi" | "spot";
+const RATE_LIMITS: Record<RateGroup, { hard: number; soft: number }> = {
+  fapi: { hard: 2400, soft: Number(process.env.RATE_SOFT_LIMIT_FAPI || 1200) },
+  spot: { hard: 6000, soft: Number(process.env.RATE_SOFT_LIMIT_SPOT || 3000) },
+};
+const RATE_MAX_WAIT_MS = 25_000;
+const rateLog: Record<RateGroup, Array<{ t: number; w: number }>> = { fapi: [], spot: [] };
+const rateHeader: Record<RateGroup, { used: number; at: number }> = {
+  fapi: { used: 0, at: 0 },
+  spot: { used: 0, at: 0 },
+};
+const rateEndpointStats = new Map<string, { count: number; weight: number; lastMin: Array<{ t: number; w: number }> }>();
+let rateThrottleWaits = 0;
+let rateThrottleRejects = 0;
+let rateThrottleWaitedMs = 0;
+const rateBootAt = Date.now();
+
+function rateGroupOf(baseUrl: string): RateGroup {
+  return baseUrl.includes("fapi.binance") ? "fapi" : "spot";
+}
+
+/** 엔드포인트별 IP weight (Binance 문서 기준). 주문 POST 는 IP weight 0. */
+function endpointWeight(endpoint: string, method: string, params: Record<string, string> = {}): number {
+  const hasSymbol = !!params.symbol;
+  if (method === "POST") return endpoint.includes("batchOrders") ? 5 : 0;
+  if (method === "DELETE") return 1;
+  if (endpoint.includes("/fapi/v1/income")) return 30;
+  if (endpoint.includes("/fapi/v1/userTrades")) return 5;
+  if (endpoint.includes("/fapi/v2/account") || endpoint.includes("/fapi/v2/positionRisk")) return 5;
+  if (endpoint.includes("/fapi/v1/openOrders")) return hasSymbol ? 1 : 40;
+  if (endpoint.includes("/fapi/v1/premiumIndex")) return hasSymbol ? 1 : 10;
+  if (endpoint.includes("/fapi/v1/apiTradingStatus")) return hasSymbol ? 1 : 10;
+  if (endpoint.includes("/fapi/v1/ticker/bookTicker")) return hasSymbol ? 2 : 5;
+  if (endpoint.includes("/fapi/v1/exchangeInfo")) return 1;
+  if (endpoint.includes("/api/v3/account")) return 20;
+  if (endpoint.includes("/api/v3/ticker/price")) return hasSymbol ? 2 : 4;
+  if (endpoint.includes("/sapi/")) return 60;
+  return 5;
+}
+
+function rateWindowWeight(g: RateGroup, now = Date.now()): number {
+  const log = rateLog[g];
+  while (log.length && now - log[0].t > 60_000) log.shift();
+  let sum = 0;
+  for (const e of log) sum += e.w;
+  // 서버 헤더값(x-mbx-used-weight-1m)이 최근 것이면 더 큰 쪽을 신뢰 (다른 프로세스·브라우저 호출 포함)
+  const h = rateHeader[g];
+  return now - h.at < 15_000 ? Math.max(sum, h.used) : sum;
+}
+
+function rateRecord(g: RateGroup, endpoint: string, method: string, w: number) {
+  const now = Date.now();
+  rateLog[g].push({ t: now, w });
+  const key = `${method} ${endpoint}`;
+  let st = rateEndpointStats.get(key);
+  if (!st) {
+    st = { count: 0, weight: 0, lastMin: [] };
+    rateEndpointStats.set(key, st);
+  }
+  st.count += 1;
+  st.weight += w;
+  st.lastMin.push({ t: now, w });
+  while (st.lastMin.length && now - st.lastMin[0].t > 60_000) st.lastMin.shift();
+}
+
+function rateNoteHeaders(g: RateGroup, response: { headers: { get(n: string): string | null } }) {
+  const raw = response.headers.get("x-mbx-used-weight-1m") || response.headers.get("x-mbx-used-weight");
+  const used = Number(raw);
+  if (Number.isFinite(used) && used >= 0) rateHeader[g] = { used, at: Date.now() };
+}
+
+/** 읽기 요청: 한도(soft) 여유가 생길 때까지 대기, 끝내 안 나면 밴 없이 429 로 거절. 주문(POST/DELETE)은 즉시 통과. */
+async function rateAcquire(g: RateGroup, endpoint: string, method: string, w: number) {
+  const bypass = method === "POST" || method === "DELETE" || w <= 0;
+  if (!bypass) {
+    const soft = RATE_LIMITS[g].soft;
+    const startedAt = Date.now();
+    let waited = false;
+    while (rateWindowWeight(g) + w > soft) {
+      if (Date.now() - startedAt > RATE_MAX_WAIT_MS) {
+        rateThrottleRejects += 1;
+        const err: any = new Error(
+          `[자체제한] ${g} 분당 weight ${rateWindowWeight(g)}/${RATE_LIMITS[g].hard} (soft ${soft}) — ${endpoint} 요청을 보류했습니다. 잠시 후 다시 시도하세요.`
+        );
+        err.status = 429;
+        err.selfThrottled = true;
+        throw err;
+      }
+      if (!waited) {
+        waited = true;
+        rateThrottleWaits += 1;
+        console.warn(`[RateLimit] ${g} ${rateWindowWeight(g)}+${w} > soft ${soft} — ${method} ${endpoint} 대기`);
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    if (waited) rateThrottleWaitedMs += Date.now() - startedAt;
+  }
+  rateRecord(g, endpoint, method, w);
+}
+
+function rateSnapshot() {
+  const now = Date.now();
+  const top = Array.from(rateEndpointStats.entries())
+    .map(([k, v]) => ({
+      endpoint: k,
+      callsSinceBoot: v.count,
+      weightSinceBoot: v.weight,
+      callsLastMin: v.lastMin.filter((e) => now - e.t <= 60_000).length,
+      weightLastMin: v.lastMin.filter((e) => now - e.t <= 60_000).reduce((a, e) => a + e.w, 0),
+    }))
+    .sort((a, b) => b.weightSinceBoot - a.weightSinceBoot)
+    .slice(0, 15);
+  return {
+    uptimeSec: Math.round((now - rateBootAt) / 1000),
+    fapi: { window1m: rateWindowWeight("fapi", now), soft: RATE_LIMITS.fapi.soft, hard: RATE_LIMITS.fapi.hard, headerUsed: rateHeader.fapi },
+    spot: { window1m: rateWindowWeight("spot", now), soft: RATE_LIMITS.spot.soft, hard: RATE_LIMITS.spot.hard, headerUsed: rateHeader.spot },
+    throttle: { waits: rateThrottleWaits, rejects: rateThrottleRejects, waitedSec: Math.round(rateThrottleWaitedMs / 1000) },
+    banUntil: binanceBanUntil > now ? binanceBanUntil : 0,
+    topEndpoints: top,
+  };
+}
+setInterval(() => {
+  const w = rateWindowWeight("fapi");
+  if (w >= RATE_LIMITS.fapi.soft * 0.8) console.warn(`[RateLimit] fapi 분당 weight ${w}/${RATE_LIMITS.fapi.hard} (soft ${RATE_LIMITS.fapi.soft})`);
+}, 15_000);
+
 let spotTickerCache: { at: number; map: Record<string, number> } | null = null;
 let bookTickerCache: {
   at: number;
@@ -225,7 +354,7 @@ const WALLET_OVERVIEW_CACHE_MS = 180_000; // 3분
 const WALLET_DETAILS_CACHE_MS = 180_000;
 const WALLET_DETAIL_GAP_MS = 450; // 상세 API 사이 간격 (IP 제한 완화)
 let trades24hCache: { at: number; data: any } | null = null;
-const TRADES_24H_CACHE_MS = 120_000; // 2분 — userTrades 심볼 순차 호출 보호
+const TRADES_24H_CACHE_MS = 300_000; // 5분 — 증분 스캔과 함께 userTrades 호출 최소화
 
 const DEFAULT_JUPITER_WALLET = "8nX7ULNGGapgbYrJzFsgKyPYog8jXtKREcWEMyvSjZG9";
 const JUPITER_WALLET = (process.env.JUPITER_WALLET || DEFAULT_JUPITER_WALLET).trim();
@@ -968,133 +1097,171 @@ async function startServer() {
   });
 
   /** 지난 24시간 선물 체결 매수/매도 합계 — 심볼 순차 조회, 2분 캐시 */
+  type Trade24h = {
+    symbol: string;
+    id: number;
+    orderId: number;
+    side: "BUY" | "SELL";
+    price: number;
+    qty: number;
+    quoteQty: number;
+    time: number;
+    realizedPnl: number;
+  };
+  // 심볼별 24h 체결 캐시 — 새 income 이 생긴 심볼만 userTrades 를 다시 조회한다(증분).
+  // 전체 재조회(심볼 수 × weight 5)가 분당 한도를 넘겨 IP 밴을 유발했던 문제의 대책.
+  const trades24hBySymbol = new Map<string, Trade24h[]>();
+  let trades24hLastScanAt = 0;
+  let trades24hInflight: Promise<any> | null = null;
+  const TRADES_24H_FULL_RESCAN_GAP_MS = 6 * 60 * 60 * 1000;
+  const TRADES_24H_SYMBOL_GAP_MS = 250;
+
+  async function computeTrades24h(full: boolean) {
+    const endTime = Date.now();
+    const startTime = endTime - 24 * 60 * 60 * 1000;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const isFull =
+      full || trades24hLastScanAt === 0 || endTime - trades24hLastScanAt > TRADES_24H_FULL_RESCAN_GAP_MS;
+    const incomeStart = isFull ? startTime : Math.max(startTime, trades24hLastScanAt - 5 * 60_000);
+    let failed = false;
+
+    const collectIncomeSymbols = async (incomeType: string) => {
+      const found = new Set<string>();
+      let windowStart = incomeStart;
+      let windowEnd = endTime;
+      for (let page = 0; page < 8; page++) {
+        const rows = await binanceRequest("/fapi/v1/income", "GET", {
+          incomeType,
+          startTime: String(windowStart),
+          endTime: String(windowEnd),
+          limit: "1000",
+        });
+        const list = Array.isArray(rows) ? rows : [];
+        for (const row of list) {
+          if (row?.symbol) found.add(String(row.symbol));
+        }
+        if (list.length < 1000) break;
+        const times = list.map((r: any) => Number(r.time) || 0).filter((n: number) => n > 0);
+        if (!times.length) break;
+        const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
+        if (newestFirst) {
+          windowEnd = Math.min(...times) - 1;
+        } else {
+          windowStart = Math.max(...times) + 1;
+        }
+        if (windowEnd <= windowStart) break;
+        await sleep(120);
+      }
+      return found;
+    };
+
+    const symbols = new Set<string>();
+    for (const incomeType of ["COMMISSION", "REALIZED_PNL"]) {
+      try {
+        const found = await collectIncomeSymbols(incomeType);
+        for (const s of found) symbols.add(s);
+      } catch (e: any) {
+        failed = true;
+        console.warn(`[trades-24h] income ${incomeType} failed:`, e?.message || e);
+      }
+    }
+
+    const symbolList = Array.from(symbols).filter(Boolean);
+    console.log(`[trades-24h] ${isFull ? "full" : "incremental"} scan — userTrades 조회 ${symbolList.length}개 심볼`);
+    for (let i = 0; i < symbolList.length; i++) {
+      const symbol = symbolList[i];
+      try {
+        const rows: Trade24h[] = [];
+        const seen = new Set<number>();
+        let fromId: string | undefined;
+        for (let page = 0; page < 10; page++) {
+          const params: Record<string, string> = {
+            symbol,
+            startTime: String(startTime),
+            endTime: String(endTime),
+            limit: "1000",
+          };
+          if (fromId) params.fromId = fromId;
+          const raw = await binanceRequest("/fapi/v1/userTrades", "GET", params);
+          const list = Array.isArray(raw) ? raw : [];
+          for (const t of list) {
+            const id = Number(t.id) || 0;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            const price = parseFloat(t.price || "0") || 0;
+            const qty = parseFloat(t.qty || "0") || 0;
+            const quoteQty = parseFloat(t.quoteQty || "") || price * qty;
+            rows.push({
+              symbol: String(t.symbol || symbol),
+              id,
+              orderId: Number(t.orderId) || 0,
+              side: String(t.side || "").toUpperCase() === "SELL" ? "SELL" : "BUY",
+              price,
+              qty,
+              quoteQty,
+              time: Number(t.time) || 0,
+              realizedPnl: parseFloat(t.realizedPnl || "0") || 0,
+            });
+          }
+          if (list.length < 1000) break;
+          const maxId = Math.max(...list.map((t: any) => Number(t.id) || 0));
+          if (!Number.isFinite(maxId) || maxId <= 0) break;
+          fromId = String(maxId + 1);
+          await sleep(TRADES_24H_SYMBOL_GAP_MS);
+        }
+        trades24hBySymbol.set(symbol, rows);
+      } catch (e: any) {
+        failed = true;
+        console.warn(`[trades-24h] ${symbol} failed:`, e?.message || e);
+        if (e?.status === 429 && !e?.selfThrottled) break; // 실제 제한/밴이면 나머지 심볼 조회 중단
+      }
+      if (i < symbolList.length - 1) await sleep(TRADES_24H_SYMBOL_GAP_MS);
+    }
+    // 24h 밖으로 밀려난 체결 제거
+    const mapped: Trade24h[] = [];
+    for (const [sym, rows] of trades24hBySymbol) {
+      const kept = rows.filter((t) => t.time >= startTime);
+      if (kept.length) {
+        trades24hBySymbol.set(sym, kept);
+        mapped.push(...kept);
+      } else {
+        trades24hBySymbol.delete(sym);
+      }
+    }
+    if (!failed) trades24hLastScanAt = endTime;
+
+    mapped.sort((a, b) => b.time - a.time);
+    const buy = mapped.filter((t) => t.side === "BUY");
+    const sell = mapped.filter((t) => t.side === "SELL");
+    return {
+      startTime,
+      endTime,
+      buyUsd: buy.reduce((s, t) => s + t.quoteQty, 0),
+      sellUsd: sell.reduce((s, t) => s + t.quoteQty, 0),
+      buy,
+      sell,
+      symbols: Array.from(trades24hBySymbol.keys()),
+      updatedAt: Date.now(),
+      cached: false,
+      scan: isFull ? "full" : "incremental",
+    };
+  }
+
   apiRouter.get("/futures/trades-24h", async (req, res) => {
     try {
       const force = String(req.query.refresh || "") === "1";
+      const full = String(req.query.full || "") === "1";
       if (!force && trades24hCache && Date.now() - trades24hCache.at < TRADES_24H_CACHE_MS) {
         res.json({ ...trades24hCache.data, cached: true });
         return;
       }
-
-      const endTime = Date.now();
-      const startTime = endTime - 24 * 60 * 60 * 1000;
-      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-      const collectIncomeSymbols = async (incomeType: string) => {
-        const found = new Set<string>();
-        let windowStart = startTime;
-        let windowEnd = endTime;
-        for (let page = 0; page < 8; page++) {
-          const rows = await binanceRequest("/fapi/v1/income", "GET", {
-            incomeType,
-            startTime: String(windowStart),
-            endTime: String(windowEnd),
-            limit: "1000",
-          });
-          const list = Array.isArray(rows) ? rows : [];
-          for (const row of list) {
-            if (row?.symbol) found.add(String(row.symbol));
-          }
-          if (list.length < 1000) break;
-          const times = list.map((r: any) => Number(r.time) || 0).filter((n: number) => n > 0);
-          if (!times.length) break;
-          const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
-          if (newestFirst) {
-            windowEnd = Math.min(...times) - 1;
-          } else {
-            windowStart = Math.max(...times) + 1;
-          }
-          if (windowEnd <= windowStart) break;
-          await sleep(120);
-        }
-        return found;
-      };
-
-      const symbols = new Set<string>();
-      for (const incomeType of ["COMMISSION", "REALIZED_PNL"]) {
-        try {
-          const found = await collectIncomeSymbols(incomeType);
-          for (const s of found) symbols.add(s);
-        } catch (e: any) {
-          console.warn(`[trades-24h] income ${incomeType} failed:`, e?.message || e);
-        }
+      // 동시에 여러 탭/요청이 와도 스캔은 한 번만
+      if (!trades24hInflight) {
+        trades24hInflight = computeTrades24h(full).finally(() => {
+          trades24hInflight = null;
+        });
       }
-
-      const symbolList = Array.from(symbols).filter(Boolean);
-      const mapped: Array<{
-        symbol: string;
-        id: number;
-        orderId: number;
-        side: "BUY" | "SELL";
-        price: number;
-        qty: number;
-        quoteQty: number;
-        time: number;
-        realizedPnl: number;
-      }> = [];
-      const seenTrade = new Set<string>();
-
-      for (let i = 0; i < symbolList.length; i++) {
-        const symbol = symbolList[i];
-        try {
-          let fromId: string | undefined;
-          for (let page = 0; page < 10; page++) {
-            const params: Record<string, string> = {
-              symbol,
-              startTime: String(startTime),
-              endTime: String(endTime),
-              limit: "1000",
-            };
-            if (fromId) params.fromId = fromId;
-            const raw = await binanceRequest("/fapi/v1/userTrades", "GET", params);
-            const list = Array.isArray(raw) ? raw : [];
-            for (const t of list) {
-              const id = Number(t.id) || 0;
-              const key = `${t.symbol || symbol}:${id}`;
-              if (seenTrade.has(key)) continue;
-              seenTrade.add(key);
-              const price = parseFloat(t.price || "0") || 0;
-              const qty = parseFloat(t.qty || "0") || 0;
-              const quoteQty = parseFloat(t.quoteQty || "") || price * qty;
-              const side = String(t.side || "").toUpperCase() === "SELL" ? "SELL" : "BUY";
-              mapped.push({
-                symbol: String(t.symbol || symbol),
-                id,
-                orderId: Number(t.orderId) || 0,
-                side,
-                price,
-                qty,
-                quoteQty,
-                time: Number(t.time) || 0,
-                realizedPnl: parseFloat(t.realizedPnl || "0") || 0,
-              });
-            }
-            if (list.length < 1000) break;
-            const maxId = Math.max(...list.map((t: any) => Number(t.id) || 0));
-            if (!Number.isFinite(maxId) || maxId <= 0) break;
-            fromId = String(maxId + 1);
-            await sleep(120);
-          }
-        } catch (e: any) {
-          console.warn(`[trades-24h] ${symbol} failed:`, e?.message || e);
-        }
-        if (i < symbolList.length - 1) await sleep(120);
-      }
-
-      mapped.sort((a, b) => b.time - a.time);
-      const buy = mapped.filter((t) => t.side === "BUY");
-      const sell = mapped.filter((t) => t.side === "SELL");
-      const data = {
-        startTime,
-        endTime,
-        buyUsd: buy.reduce((s, t) => s + t.quoteQty, 0),
-        sellUsd: sell.reduce((s, t) => s + t.quoteQty, 0),
-        buy,
-        sell,
-        symbols: symbolList,
-        updatedAt: Date.now(),
-        cached: false,
-      };
+      const data = await trades24hInflight;
       trades24hCache = { at: Date.now(), data };
       res.json(data);
     } catch (err: any) {
@@ -1145,7 +1312,9 @@ async function startServer() {
       }
       const now = Date.now();
       if (!bookTickerCache || now - bookTickerCache.at >= BOOK_TICKER_CACHE_MS) {
+        await rateAcquire("fapi", "/fapi/v1/ticker/bookTicker", "GET", 5);
         const response = await fetch(`${BASE_URL}/fapi/v1/ticker/bookTicker`);
+        rateNoteHeaders("fapi", response);
         const text = await response.text();
         let data: any = [];
         try {
@@ -1193,9 +1362,15 @@ async function startServer() {
     }
   });
 
+  apiRouter.get("/rate-stats", (_req, res) => {
+    res.json(rateSnapshot());
+  });
+
   apiRouter.get("/futures/exchange-info", async (req, res) => {
     try {
+      await rateAcquire("fapi", "/fapi/v1/exchangeInfo", "GET", 1);
       const response = await fetch(`${BASE_URL}/fapi/v1/exchangeInfo`);
+      rateNoteHeaders("fapi", response);
       const data = await response.json();
       res.json(data);
     } catch (err: any) {
@@ -1474,6 +1649,9 @@ async function startServer() {
       .update(signParams.toString())
       .digest("hex");
 
+    const rateG = rateGroupOf(baseUrl);
+    await rateAcquire(rateG, endpoint, method, endpointWeight(endpoint, method, params));
+
     console.log(`[Binance Request] ${method} ${baseUrl}${endpoint} (with params: ${JSON.stringify(params)})`);
 
     let url: string;
@@ -1503,6 +1681,7 @@ async function startServer() {
 
     try {
       const response = await fetch(url, fetchOptions);
+      rateNoteHeaders(rateG, response);
 
       const responseText = await response.text();
       let responseData: any;
