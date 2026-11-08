@@ -244,12 +244,14 @@ export class BinanceService {
   static async getFuturesTrades(symbol?: string, params?: {
     startTime?: number;
     endTime?: number;
+    fromId?: number;
     limit?: number;
   }): Promise<FuturesTrade[]> {
     const query = new URLSearchParams();
     if (symbol) query.append('symbol', symbol);
     if (params?.startTime) query.append('startTime', params.startTime.toString());
     if (params?.endTime) query.append('endTime', params.endTime.toString());
+    if (params?.fromId) query.append('fromId', params.fromId.toString());
     if (params?.limit) query.append('limit', params.limit.toString());
     const queryString = query.toString();
     const url = queryString ? `/api/futures/trades?${queryString}` : '/api/futures/trades';

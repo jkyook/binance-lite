@@ -1083,11 +1083,12 @@ async function startServer() {
 
   apiRouter.get("/futures/trades", async (req, res) => {
     try {
-      const { symbol, startTime, endTime, limit } = req.query;
+      const { symbol, startTime, endTime, fromId, limit } = req.query;
       const params: Record<string, string> = {};
       if (symbol) params.symbol = symbol as string;
       if (startTime) params.startTime = startTime as string;
       if (endTime) params.endTime = endTime as string;
+      if (fromId) params.fromId = fromId as string;
       if (limit) params.limit = limit as string;
       const data = await binanceRequest("/fapi/v1/userTrades", "GET", params);
       res.json(data);

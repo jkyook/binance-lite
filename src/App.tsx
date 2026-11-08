@@ -205,6 +205,11 @@ export default function App() {
   const [expandedOrders, setExpandedOrders] = useState(false);
   const [expandedTrades, setExpandedTrades] = useState(false);
   const [expandedIncome, setExpandedIncome] = useState(false);
+  const [constituentSymbol, setConstituentSymbol] = useState<string | null>(null);
+  const [constituentTrades, setConstituentTrades] = useState<Record<string, FuturesTrade[]>>({});
+  const [constituentTradesLoading, setConstituentTradesLoading] = useState(false);
+  const [constituentTradesError, setConstituentTradesError] = useState<string | null>(null);
+  const constituentTradesAtRef = useRef<Record<string, number>>({});
   const [selectedOpenOrderKey, setSelectedOpenOrderKey] = useState<string | null>(null);
   const [cancellingOrderKey, setCancellingOrderKey] = useState<string | null>(null);
   const [placingBuyOrderKey, setPlacingBuyOrderKey] = useState<string | null>(null);
@@ -1876,6 +1881,101 @@ export default function App() {
       }));
   }, [positions, totalExposure]);
   const allocationTotal = positionAllocationData.reduce((sum, p) => sum + p.value, 0);
+
+  useEffect(() => {
+    const symbol = constituentSymbol;
+    if (!symbol) return;
+    const fetchedAt = constituentTradesAtRef.current[symbol] || 0;
+    if (fetchedAt > 0 && Date.now() - fetchedAt < 120_000) return;
+    let cancelled = false;
+    setConstituentTradesLoading(true);
+    setConstituentTradesError(null);
+    const endTime = Date.now();
+    const startTime = endTime - 24 * 60 * 60 * 1000;
+    (async () => {
+      const all: FuturesTrade[] = [];
+      const seen = new Set<number>();
+      let fromId: number | undefined;
+      for (let page = 0; page < 6; page++) {
+        const batch = await BinanceService.getFuturesTrades(symbol, {
+          startTime,
+          endTime,
+          fromId,
+          limit: 1000,
+        });
+        if (!batch?.length) break;
+        let maxId = 0;
+        for (const row of batch) {
+          const id = Number(row.id) || 0;
+          if (id > maxId) maxId = id;
+          const t = Number(row.time) || 0;
+          if (t < startTime || t > endTime) continue;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          all.push(row);
+        }
+        if (batch.length < 1000 || !maxId) break;
+        fromId = maxId + 1;
+      }
+      return all.sort((a, b) => (b.time || 0) - (a.time || 0));
+    })()
+      .then((sorted) => {
+        if (cancelled) return;
+        constituentTradesAtRef.current[symbol] = Date.now();
+        setConstituentTrades((prev) => ({ ...prev, [symbol]: sorted }));
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setConstituentTradesError(e?.message || '체결 조회 실패');
+      })
+      .finally(() => {
+        if (!cancelled) setConstituentTradesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [constituentSymbol]);
+
+  const constituentDetail = useMemo(() => {
+    if (!constituentSymbol) return null;
+    const pos = positions.find((p) => p.symbol === constituentSymbol);
+    const amt = pos ? parseFloat(pos.positionAmt) : 0;
+    const entry = pos ? parseFloat(pos.entryPrice) : NaN;
+    const mark = pos ? parseFloat(pos.markPrice) : NaN;
+    const upnl = pos ? parseFloat(pos.unRealizedProfit) : NaN;
+    const breakEven = pos ? parseFloat(pos.breakEvenPrice || '') : NaN;
+    const liq = pos ? parseFloat(pos.liquidationPrice) : NaN;
+    const closeOrders = pos
+      ? openOrders.filter((order) => {
+          if (order.symbol !== pos.symbol) return false;
+          const stopPx = parseFloat((order as { stopPrice?: string }).stopPrice || '');
+          const px = parseFloat(order.price);
+          const shown = Number.isFinite(px) && px > 0 ? px : stopPx;
+          if (!Number.isFinite(shown) || shown <= 0) return false;
+          return (amt > 0 && order.side === 'SELL') || (amt < 0 && order.side === 'BUY');
+        })
+      : [];
+    const tradesForSymbol = constituentTrades[constituentSymbol] || [];
+    const since24h = Date.now() - 24 * 60 * 60 * 1000;
+    const incomeFallback = tradesForSymbol.length
+      ? []
+      : incomeHistory
+          .filter((row) => row.symbol === constituentSymbol && row.incomeType === 'REALIZED_PNL' && row.time >= since24h)
+          .sort((a, b) => b.time - a.time);
+    return {
+      pos,
+      amt,
+      entry,
+      mark,
+      upnl,
+      notional: Math.abs(amt) * (Number.isFinite(mark) ? mark : 0),
+      breakEven: Number.isFinite(breakEven) && breakEven > 0 ? breakEven : null,
+      liq: Number.isFinite(liq) && liq > 0 ? liq : null,
+      closeOrders,
+      tradesForSymbol,
+      incomeFallback,
+    };
+  }, [constituentSymbol, positions, openOrders, constituentTrades, incomeHistory]);
   const openOrderTotals = useMemo(() => {
     return openOrders.reduce(
       (acc, order) => {
@@ -2896,24 +2996,151 @@ export default function App() {
               <div className="w-full lg:w-[58%] space-y-2">
                 <div className="metric-label mb-2">Top constituents</div>
                 <div className="grid grid-cols-2 gap-2 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
-                  {positionAllocationData.filter(p => p.symbol !== 'OTHERS').slice(0, 8).map((p) => (
-                    <div key={p.symbol} className="panel-soft p-3 flex flex-col gap-1">
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: p.color }} />
-                        <span className="text-sm font-semibold text-white">{p.name}</span>
-                      </div>
-                      <div className="flex justify-between items-end font-mono">
-                        <span className="text-xs text-ink-400">
-                          ${p.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                          <span className="opacity-50 ml-1">({allocationTotal > 0 ? ((p.value / allocationTotal) * 100).toFixed(1) : '0.0'}%)</span>
-                        </span>
-                        <span className={`text-xs ${p.pnl >= 0 ? 'text-ok' : 'text-danger'}`}>
-                          {p.pnl >= 0 ? '+' : ''}{Math.round(p.pnl)}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                  {positionAllocationData.filter(p => p.symbol !== 'OTHERS').slice(0, 8).map((p) => {
+                    const picked = constituentSymbol === p.symbol;
+                    return (
+                      <button
+                        key={p.symbol}
+                        type="button"
+                        onClick={() => setConstituentSymbol((cur) => (cur === p.symbol ? null : p.symbol))}
+                        className={`panel-soft p-3 flex flex-col gap-1 text-left ${picked ? 'border-accent/45 bg-accent/10' : 'hover:border-white/15'}`}
+                        title={picked ? '클릭하면 닫기' : '포지션·청산가·최근 체결'}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: p.color }} />
+                          <span className="text-sm font-semibold text-white">{p.name}</span>
+                        </div>
+                        <div className="flex justify-between items-end font-mono">
+                          <span className="text-xs text-ink-400">
+                            ${p.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            <span className="opacity-50 ml-1">({allocationTotal > 0 ? ((p.value / allocationTotal) * 100).toFixed(1) : '0.0'}%)</span>
+                          </span>
+                          <span className={`text-xs ${p.pnl >= 0 ? 'text-ok' : 'text-danger'}`}>
+                            {p.pnl >= 0 ? '+' : ''}{Math.round(p.pnl)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
+                {constituentDetail && (
+                  <div className="panel-soft p-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-white">
+                        {constituentDetail.pos?.symbol.replace(/USDT|USDC/g, '') || constituentSymbol}
+                      </span>
+                      <button
+                        type="button"
+                        className="text-[10px] text-ink-500 hover:text-white"
+                        onClick={() => setConstituentSymbol(null)}
+                      >
+                        닫기
+                      </button>
+                    </div>
+                    {constituentDetail.pos ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px] font-mono">
+                          <div className="text-ink-400">보유포지션</div>
+                          <div className={`text-right ${constituentDetail.amt >= 0 ? 'text-ok' : 'text-danger'}`}>
+                            {constituentDetail.amt >= 0 ? 'LONG' : 'SHORT'} {formatQty(constituentDetail.amt)}
+                            <span className="text-ink-400"> · {constituentDetail.pos.leverage}x {constituentDetail.pos.marginType}</span>
+                          </div>
+                          <div className="text-ink-400">진입 / 마크</div>
+                          <div className="text-right text-white tabular-nums">
+                            ${formatTickerPrice(constituentDetail.entry) || '—'}
+                            <span className="text-ink-500"> / </span>
+                            ${formatTickerPrice(constituentDetail.mark) || '—'}
+                          </div>
+                          <div className="text-ink-400">평가 / 미실현</div>
+                          <div className="text-right tabular-nums">
+                            <span className="text-white">${Math.round(constituentDetail.notional).toLocaleString()}</span>
+                            <span className={constituentDetail.upnl >= 0 ? 'text-ok' : 'text-danger'}>
+                              {' '}{constituentDetail.upnl >= 0 ? '+' : ''}{Math.round(constituentDetail.upnl).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="text-ink-400">손익분기점</div>
+                          <div className="text-right text-white tabular-nums">
+                            {constituentDetail.breakEven != null ? `$${formatTickerPrice(constituentDetail.breakEven)}` : '—'}
+                          </div>
+                          <div className="text-ink-400">청산예정가</div>
+                          <div className="text-right text-danger tabular-nums">
+                            {constituentDetail.liq != null ? `$${formatTickerPrice(constituentDetail.liq)}` : '—'}
+                          </div>
+                        </div>
+                        {constituentDetail.closeOrders.length > 0 && (
+                          <div className="text-[10px] font-mono text-ink-400 leading-snug">
+                            청산 주문{' '}
+                            {constituentDetail.closeOrders.slice(0, 3).map((order) => {
+                              const stopPx = parseFloat((order as { stopPrice?: string }).stopPrice || '');
+                              const px = parseFloat(order.price);
+                              const shown = Number.isFinite(px) && px > 0 ? px : stopPx;
+                              return (
+                                <span key={order.orderId} className="text-white">
+                                  {order.side === 'BUY' ? '매수' : '매도'} ${formatTickerPrice(shown)} × {formatQty(order.origQty)}{' '}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-[11px] text-ink-400">열린 포지션이 없습니다.</div>
+                    )}
+                    <div>
+                      <div className="metric-label mb-1.5">
+                        24시간 체결
+                        {constituentDetail.tradesForSymbol.length > 0 ? ` (${constituentDetail.tradesForSymbol.length})` : ''}
+                      </div>
+                      {constituentTradesLoading && constituentDetail.tradesForSymbol.length === 0 && (
+                        <div className="text-[11px] text-ink-400">체결 불러오는 중…</div>
+                      )}
+                      {constituentTradesError && constituentDetail.tradesForSymbol.length === 0 && (
+                        <div className="text-[11px] text-warn leading-snug">{constituentTradesError}</div>
+                      )}
+                      {constituentDetail.tradesForSymbol.length > 0 ? (
+                        <ul className="space-y-1 max-h-[280px] overflow-y-auto custom-scrollbar">
+                          {constituentDetail.tradesForSymbol.map((row) => {
+                            const pnl = parseFloat(row.realizedPnl || '0');
+                            return (
+                              <li
+                                key={`${row.symbol}-${row.id}`}
+                                className="grid grid-cols-[88px_28px_1fr_auto] gap-x-2 items-baseline text-[10px] font-mono border-b border-white/[0.04] last:border-0 py-1"
+                              >
+                                <span className="text-ink-500 tabular-nums">
+                                  {formatSeoulTime(row.time)}
+                                </span>
+                                <span className={row.side === 'BUY' ? 'text-ok' : 'text-danger'}>{row.side === 'BUY' ? '매수' : '매도'}</span>
+                                <span className="text-white truncate tabular-nums">
+                                  {formatQty(row.qty)} @ {formatTickerPrice(row.price) || row.price}
+                                </span>
+                                <span className={`tabular-nums ${pnl > 0 ? 'text-ok' : pnl < 0 ? 'text-danger' : 'text-ink-500'}`}>
+                                  {Math.abs(pnl) < 0.005 ? '0' : formatIncomeAmount(pnl)}
+                                </span>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : !constituentTradesLoading && constituentDetail.incomeFallback.length > 0 ? (
+                        <ul className="space-y-1 max-h-[160px] overflow-y-auto custom-scrollbar">
+                          {constituentDetail.incomeFallback.map((row) => (
+                            <li
+                              key={`${row.tranId}-${row.time}`}
+                              className="flex justify-between gap-2 text-[10px] font-mono border-b border-white/[0.04] last:border-0 py-1"
+                            >
+                              <span className="text-ink-500">{formatSeoulTime(row.time)}</span>
+                              <span className="text-ink-400">실현</span>
+                              <span className={parseFloat(row.income) >= 0 ? 'text-ok' : 'text-danger'}>
+                                {formatIncomeAmount(row.income)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : !constituentTradesLoading && !constituentTradesError ? (
+                        <div className="text-[11px] text-ink-500">24시간 내 체결이 없습니다.</div>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

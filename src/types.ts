@@ -39,6 +39,7 @@ export interface FuturesPosition {
   markPrice: string;
   unRealizedProfit: string;
   liquidationPrice: string;
+  breakEvenPrice?: string;
   leverage: string;
   marginType: string;
 }
