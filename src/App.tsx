@@ -1881,6 +1881,28 @@ export default function App() {
       }));
   }, [positions, totalExposure]);
   const allocationTotal = positionAllocationData.reduce((sum, p) => sum + p.value, 0);
+  const topConstituents = useMemo(() => {
+    const colorBySymbol = new Map(positionAllocationData.map((p) => [p.symbol, p.color]));
+    return positions
+      .map((p) => {
+        const amount = Math.abs(parseFloat(p.positionAmt));
+        const markPrice = parseFloat(p.markPrice);
+        const value = amount * markPrice;
+        return {
+          symbol: p.symbol,
+          name: p.symbol.replace('USDT', ''),
+          value,
+          pnl: parseFloat(p.unRealizedProfit),
+        };
+      })
+      .filter((p) => Number.isFinite(p.value) && p.value > 0)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 20)
+      .map((p, index) => ({
+        ...p,
+        color: colorBySymbol.get(p.symbol) || PORTFOLIO_COLORS[index % PORTFOLIO_COLORS.length],
+      }));
+  }, [positions, positionAllocationData]);
 
   useEffect(() => {
     const symbol = constituentSymbol;
@@ -2996,7 +3018,7 @@ export default function App() {
               <div className="w-full lg:w-[58%] space-y-2">
                 <div className="metric-label mb-2">Top constituents</div>
                 <div className="grid grid-cols-2 gap-2 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
-                  {positionAllocationData.filter(p => p.symbol !== 'OTHERS').slice(0, 20).map((p) => {
+                  {topConstituents.map((p) => {
                     const picked = constituentSymbol === p.symbol;
                     return (
                       <button
