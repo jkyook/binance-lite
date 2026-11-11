@@ -3027,6 +3027,9 @@ export default function App() {
                         onClick={() => {
                           setActiveSymbol(p.symbol);
                           setManualOrderSymbol(p.symbol);
+                          const live = stats[p.symbol]?.price;
+                          const mark = positions.find((row) => row.symbol === p.symbol)?.markPrice;
+                          setManualOrderPrice(formatLimitPrice(p.symbol, live || mark || ''));
                           setConstituentSymbol((cur) => (cur === p.symbol ? null : p.symbol));
                         }}
                         className={`panel-soft p-3 flex flex-col gap-1 text-left ${picked ? 'border-accent/45 bg-accent/10' : 'hover:border-white/15'}`}
