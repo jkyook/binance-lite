@@ -2996,7 +2996,7 @@ export default function App() {
               <div className="w-full lg:w-[58%] space-y-2">
                 <div className="metric-label mb-2">Top constituents</div>
                 <div className="grid grid-cols-2 gap-2 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
-                  {positionAllocationData.filter(p => p.symbol !== 'OTHERS').slice(0, 8).map((p) => {
+                  {positionAllocationData.filter(p => p.symbol !== 'OTHERS').slice(0, 20).map((p) => {
                     const picked = constituentSymbol === p.symbol;
                     return (
                       <button
@@ -3023,8 +3023,15 @@ export default function App() {
                     );
                   })}
                 </div>
-                {constituentDetail && (
-                  <div className="panel-soft p-3 space-y-2.5">
+                {constituentDetail && createPortal(
+                  <div
+                    className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-ink-950/80 backdrop-blur-sm"
+                    onClick={() => setConstituentSymbol(null)}
+                  >
+                  <div
+                    className="panel w-full max-w-md p-4 space-y-2.5 max-h-[80vh] overflow-y-auto custom-scrollbar shadow-2xl"
+                    onClick={(event) => event.stopPropagation()}
+                  >
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-semibold text-white">
                         {constituentDetail.pos?.symbol.replace(/USDT|USDC/g, '') || constituentSymbol}
@@ -3140,6 +3147,8 @@ export default function App() {
                       ) : null}
                     </div>
                   </div>
+                  </div>,
+                  document.body
                 )}
               </div>
             </div>
