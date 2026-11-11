@@ -3002,7 +3002,11 @@ export default function App() {
                       <button
                         key={p.symbol}
                         type="button"
-                        onClick={() => setConstituentSymbol((cur) => (cur === p.symbol ? null : p.symbol))}
+                        onClick={() => {
+                          setActiveSymbol(p.symbol);
+                          setManualOrderSymbol(p.symbol);
+                          setConstituentSymbol((cur) => (cur === p.symbol ? null : p.symbol));
+                        }}
                         className={`panel-soft p-3 flex flex-col gap-1 text-left ${picked ? 'border-accent/45 bg-accent/10' : 'hover:border-white/15'}`}
                         title={picked ? '클릭하면 닫기' : '포지션·청산가·최근 체결'}
                       >
