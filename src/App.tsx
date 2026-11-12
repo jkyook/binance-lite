@@ -23,6 +23,13 @@ import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+const CONSTITUENT_CHART_RANGES = [
+  { id: '1m', label: '1개월', days: 31 },
+  { id: '3m', label: '3개월', days: 92 },
+  { id: '6m', label: '6개월', days: 183 },
+  { id: '1y', label: '1년', days: 366 },
+] as const;
+type ConstituentChartRange = typeof CONSTITUENT_CHART_RANGES[number]['id'];
 // 브라우저 탭 제목에 표시할 BTC 시세 (USDC 마켓)
 const TITLE_SYMBOL = 'BTCUSDC';
 // USD-M 주문 한도 300건/10초, 1200건/분. 450ms면 약 22건/10초라 한도에 닿지 않는다.
@@ -212,6 +219,7 @@ export default function App() {
   const constituentTradesAtRef = useRef<Record<string, number>>({});
   const [constituentKlines, setConstituentKlines] = useState<Record<string, { t: number; price: number }[]>>({});
   const [constituentKlinesLoading, setConstituentKlinesLoading] = useState(false);
+  const [constituentChartRange, setConstituentChartRange] = useState<ConstituentChartRange>('6m');
   const constituentKlinesRef = useRef(constituentKlines);
   const [selectedOpenOrderKey, setSelectedOpenOrderKey] = useState<string | null>(null);
   const [cancellingOrderKey, setCancellingOrderKey] = useState<string | null>(null);
@@ -1971,7 +1979,7 @@ export default function App() {
     if ((constituentKlinesRef.current[symbol] || []).length > 0) return;
     let cancelled = false;
     setConstituentKlinesLoading(true);
-    BinanceService.getKlines(symbol, '1d', 183)
+    BinanceService.getKlines(symbol, '1d', 366)
       .then((rows: any[]) => {
         if (cancelled) return;
         const points = (Array.isArray(rows) ? rows : [])
@@ -2033,7 +2041,9 @@ export default function App() {
 
   const constituentChart = useMemo(() => {
     if (!constituentSymbol) return null;
-    const points = constituentKlines[constituentSymbol] || [];
+    const range = CONSTITUENT_CHART_RANGES.find((item) => item.id === constituentChartRange) || CONSTITUENT_CHART_RANGES[2];
+    const cutoff = Date.now() - range.days * 24 * 60 * 60 * 1000;
+    const points = (constituentKlines[constituentSymbol] || []).filter((point) => point.t >= cutoff);
     const grouped = new Map<string, { side: string; price: number; qty: number }>();
     openOrders.forEach((order) => {
       if (order.symbol !== constituentSymbol) return;
@@ -2060,7 +2070,7 @@ export default function App() {
       domain = [lo - pad, hi + pad];
     }
     return { points, orders, domain };
-  }, [constituentSymbol, constituentKlines, openOrders]);
+  }, [constituentSymbol, constituentKlines, constituentChartRange, openOrders]);
 
   const openOrderTotals = useMemo(() => {
     return openOrders.reduce(
@@ -3242,7 +3252,24 @@ export default function App() {
                     </div>
                   </div>
                   <div className="panel flex min-h-[340px] min-w-0 flex-1 flex-col p-4 shadow-2xl">
-                    <div className="metric-label mb-2">6개월 가격 · 미체결</div>
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="metric-label">가격 · 미체결</div>
+                      <div className="flex gap-1">
+                        {CONSTITUENT_CHART_RANGES.map((range) => {
+                          const on = range.id === constituentChartRange;
+                          return (
+                            <button
+                              key={range.id}
+                              type="button"
+                              onClick={() => setConstituentChartRange(range.id)}
+                              className={`rounded px-1.5 py-0.5 text-[10px] ${on ? 'bg-accent/25 text-white' : 'text-ink-400 hover:text-white'}`}
+                            >
+                              {range.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                     {constituentKlinesLoading && (!constituentChart || constituentChart.points.length === 0) ? (
                       <div className="text-[11px] text-ink-400">가격을 불러오는 중…</div>
                     ) : constituentChart && constituentChart.points.length > 0 ? (
@@ -3309,7 +3336,7 @@ export default function App() {
                         )}
                       </>
                     ) : (
-                      <div className="text-[11px] text-ink-500">6개월 가격을 불러오지 못했습니다.</div>
+                      <div className="text-[11px] text-ink-500">가격을 불러오지 못했습니다.</div>
                     )}
                   </div>
                   </div>
