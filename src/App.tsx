@@ -17,7 +17,7 @@ import {
   PieChart,
   X,
 } from 'lucide-react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend } from 'recharts';
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine } from 'recharts';
 import { AssetStats, MarketInsight, FuturesPosition, FuturesOrder, FuturesTrade, FuturesTrades24h, HistoricalSnapshot, FuturesIncome } from './types';
 import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
@@ -210,6 +210,9 @@ export default function App() {
   const [constituentTradesLoading, setConstituentTradesLoading] = useState(false);
   const [constituentTradesError, setConstituentTradesError] = useState<string | null>(null);
   const constituentTradesAtRef = useRef<Record<string, number>>({});
+  const [constituentKlines, setConstituentKlines] = useState<Record<string, { t: number; price: number }[]>>({});
+  const [constituentKlinesLoading, setConstituentKlinesLoading] = useState(false);
+  const constituentKlinesRef = useRef(constituentKlines);
   const [selectedOpenOrderKey, setSelectedOpenOrderKey] = useState<string | null>(null);
   const [cancellingOrderKey, setCancellingOrderKey] = useState<string | null>(null);
   const [placingBuyOrderKey, setPlacingBuyOrderKey] = useState<string | null>(null);
@@ -1958,6 +1961,35 @@ export default function App() {
     };
   }, [constituentSymbol]);
 
+  useEffect(() => {
+    constituentKlinesRef.current = constituentKlines;
+  }, [constituentKlines]);
+
+  useEffect(() => {
+    const symbol = constituentSymbol;
+    if (!symbol) return;
+    if ((constituentKlinesRef.current[symbol] || []).length > 0) return;
+    let cancelled = false;
+    setConstituentKlinesLoading(true);
+    BinanceService.getKlines(symbol, '1d', 183)
+      .then((rows: any[]) => {
+        if (cancelled) return;
+        const points = (Array.isArray(rows) ? rows : [])
+          .map((k) => ({ t: Number(k[0]), price: parseFloat(k[4]) }))
+          .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.price) && p.price > 0);
+        if (points.length > 0) {
+          setConstituentKlines((prev) => ({ ...prev, [symbol]: points }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setConstituentKlinesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [constituentSymbol]);
+
   const constituentDetail = useMemo(() => {
     if (!constituentSymbol) return null;
     const pos = positions.find((p) => p.symbol === constituentSymbol);
@@ -1998,6 +2030,38 @@ export default function App() {
       incomeFallback,
     };
   }, [constituentSymbol, positions, openOrders, constituentTrades, incomeHistory]);
+
+  const constituentChart = useMemo(() => {
+    if (!constituentSymbol) return null;
+    const points = constituentKlines[constituentSymbol] || [];
+    const grouped = new Map<string, { side: string; price: number; qty: number }>();
+    openOrders.forEach((order) => {
+      if (order.symbol !== constituentSymbol) return;
+      const px = parseFloat(order.price);
+      const stopPx = parseFloat((order as { stopPrice?: string }).stopPrice || '');
+      const price = Number.isFinite(px) && px > 0 ? px : stopPx;
+      if (!Number.isFinite(price) || price <= 0) return;
+      const orig = parseFloat(order.origQty);
+      const done = parseFloat(order.executedQty || '0');
+      const qty = Math.max(0, (Number.isFinite(orig) ? orig : 0) - (Number.isFinite(done) ? done : 0));
+      const side = order.side === 'BUY' ? 'BUY' : 'SELL';
+      const key = side + ':' + String(price);
+      const prev = grouped.get(key);
+      if (prev) prev.qty += qty;
+      else grouped.set(key, { side, price, qty });
+    });
+    const orders = Array.from(grouped.values()).sort((a, b) => a.price - b.price);
+    const ys = points.map((p) => p.price).concat(orders.map((o) => o.price));
+    let domain: [number, number] | undefined;
+    if (ys.length > 0) {
+      const lo = Math.min.apply(null, ys);
+      const hi = Math.max.apply(null, ys);
+      const pad = hi > lo ? (hi - lo) * 0.08 : hi * 0.02;
+      domain = [lo - pad, hi + pad];
+    }
+    return { points, orders, domain };
+  }, [constituentSymbol, constituentKlines, openOrders]);
+
   const openOrderTotals = useMemo(() => {
     return openOrders.reduce(
       (acc, order) => {
@@ -3058,9 +3122,10 @@ export default function App() {
                     onClick={() => setConstituentSymbol(null)}
                   >
                   <div
-                    className="panel w-full max-w-md p-4 space-y-2.5 max-h-[80vh] overflow-y-auto custom-scrollbar shadow-2xl"
+                    className="flex w-full max-w-5xl max-h-[85vh] flex-col gap-3 lg:flex-row"
                     onClick={(event) => event.stopPropagation()}
                   >
+                  <div className="panel w-full lg:w-[400px] shrink-0 p-4 space-y-2.5 max-h-[85vh] overflow-y-auto custom-scrollbar shadow-2xl">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-semibold text-white">
                         {constituentDetail.pos?.symbol.replace(/USDT|USDC/g, '') || constituentSymbol}
@@ -3175,6 +3240,78 @@ export default function App() {
                         <div className="text-[11px] text-ink-500">24시간 내 체결이 없습니다.</div>
                       ) : null}
                     </div>
+                  </div>
+                  <div className="panel flex min-h-[340px] min-w-0 flex-1 flex-col p-4 shadow-2xl">
+                    <div className="metric-label mb-2">6개월 가격 · 미체결</div>
+                    {constituentKlinesLoading && (!constituentChart || constituentChart.points.length === 0) ? (
+                      <div className="text-[11px] text-ink-400">가격을 불러오는 중…</div>
+                    ) : constituentChart && constituentChart.points.length > 0 ? (
+                      <>
+                        <div className="h-[360px] w-full">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={constituentChart.points} margin={{ top: 16, right: 12, left: 0, bottom: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+                              <XAxis
+                                dataKey="t"
+                                tickFormatter={(value) => new Date(Number(value)).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' })}
+                                minTickGap={36}
+                                fontSize={10}
+                                tick={{ fill: '#8b98ad' }}
+                              />
+                              <YAxis
+                                domain={constituentChart.domain}
+                                tickFormatter={(value) => formatTickerPrice(value) || ''}
+                                fontSize={10}
+                                width={72}
+                                tick={{ fill: '#8b98ad' }}
+                              />
+                              <Tooltip
+                                contentStyle={{ backgroundColor: '#11151c', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', fontSize: '11px' }}
+                                labelFormatter={(value) => new Date(Number(value)).toLocaleDateString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' })}
+                                formatter={(value: number | string) => [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', '종가']}
+                              />
+                              <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                              {constituentChart.orders.map((order) => {
+                                const buy = order.side === 'BUY';
+                                const color = buy ? '#10b981' : '#f43f5e';
+                                const text = `${buy ? '매수' : '매도'} ${formatQty(order.qty)}`;
+                                return (
+                                  <ReferenceLine
+                                    key={`${order.side}-${order.price}`}
+                                    y={order.price}
+                                    stroke={color}
+                                    strokeDasharray="4 4"
+                                    ifOverflow="extendDomain"
+                                    label={(props: { viewBox?: { x?: number; y?: number; width?: number } }) => {
+                                      const box = props.viewBox;
+                                      if (!box || box.x == null || box.y == null) return null;
+                                      return (
+                                        <text
+                                          x={box.x + (box.width || 0) - 4}
+                                          y={box.y - 4}
+                                          textAnchor="end"
+                                          fill={color}
+                                          fontSize={10}
+                                          fontFamily="ui-monospace, monospace"
+                                        >
+                                          {text}
+                                        </text>
+                                      );
+                                    }}
+                                  />
+                                );
+                              })}
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                        {constituentChart.orders.length === 0 && (
+                          <div className="mt-2 text-[11px] text-ink-500">이 종목의 미체결 주문이 없습니다.</div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-[11px] text-ink-500">6개월 가격을 불러오지 못했습니다.</div>
+                    )}
+                  </div>
                   </div>
                   </div>,
                   document.body
