@@ -24,10 +24,12 @@ import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './serv
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
 const CONSTITUENT_CHART_RANGES = [
-  { id: '1m', label: '1개월', days: 31 },
-  { id: '3m', label: '3개월', days: 92 },
-  { id: '6m', label: '6개월', days: 183 },
-  { id: '1y', label: '1년', days: 366 },
+  { id: '1d', label: '1일', days: 1, interval: '15m', limit: 96 },
+  { id: '1w', label: '1주일', days: 7, interval: '1h', limit: 168 },
+  { id: '1m', label: '1개월', days: 31, interval: '1d', limit: 366 },
+  { id: '3m', label: '3개월', days: 92, interval: '1d', limit: 366 },
+  { id: '6m', label: '6개월', days: 183, interval: '1d', limit: 366 },
+  { id: '1y', label: '1년', days: 366, interval: '1d', limit: 366 },
 ] as const;
 type ConstituentChartRange = typeof CONSTITUENT_CHART_RANGES[number]['id'];
 // 브라우저 탭 제목에 표시할 BTC 시세 (USDC 마켓)
@@ -1976,17 +1978,19 @@ export default function App() {
   useEffect(() => {
     const symbol = constituentSymbol;
     if (!symbol) return;
-    if ((constituentKlinesRef.current[symbol] || []).length > 0) return;
+    const range = CONSTITUENT_CHART_RANGES.find((item) => item.id === constituentChartRange) || CONSTITUENT_CHART_RANGES[4];
+    const key = symbol + '|' + range.interval;
+    if ((constituentKlinesRef.current[key] || []).length > 0) return;
     let cancelled = false;
     setConstituentKlinesLoading(true);
-    BinanceService.getKlines(symbol, '1d', 366)
+    BinanceService.getKlines(symbol, range.interval, range.limit)
       .then((rows: any[]) => {
         if (cancelled) return;
         const points = (Array.isArray(rows) ? rows : [])
           .map((k) => ({ t: Number(k[0]), price: parseFloat(k[4]) }))
           .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.price) && p.price > 0);
         if (points.length > 0) {
-          setConstituentKlines((prev) => ({ ...prev, [symbol]: points }));
+          setConstituentKlines((prev) => ({ ...prev, [key]: points }));
         }
       })
       .catch(() => {})
@@ -1996,7 +2000,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [constituentSymbol]);
+  }, [constituentSymbol, constituentChartRange]);
 
   const constituentDetail = useMemo(() => {
     if (!constituentSymbol) return null;
@@ -2041,9 +2045,9 @@ export default function App() {
 
   const constituentChart = useMemo(() => {
     if (!constituentSymbol) return null;
-    const range = CONSTITUENT_CHART_RANGES.find((item) => item.id === constituentChartRange) || CONSTITUENT_CHART_RANGES[2];
+    const range = CONSTITUENT_CHART_RANGES.find((item) => item.id === constituentChartRange) || CONSTITUENT_CHART_RANGES[4];
     const cutoff = Date.now() - range.days * 24 * 60 * 60 * 1000;
-    const points = (constituentKlines[constituentSymbol] || []).filter((point) => point.t >= cutoff);
+    const points = (constituentKlines[constituentSymbol + '|' + range.interval] || []).filter((point) => point.t >= cutoff);
     const grouped = new Map<string, { side: string; price: number; qty: number }>();
     openOrders.forEach((order) => {
       if (order.symbol !== constituentSymbol) return;
@@ -3254,7 +3258,7 @@ export default function App() {
                   <div className="panel flex min-h-[340px] min-w-0 flex-1 flex-col p-4 shadow-2xl">
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <div className="metric-label">가격 · 미체결</div>
-                      <div className="flex gap-1">
+                      <div className="flex flex-wrap justify-end gap-1">
                         {CONSTITUENT_CHART_RANGES.map((range) => {
                           const on = range.id === constituentChartRange;
                           return (
@@ -3280,7 +3284,13 @@ export default function App() {
                               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
                               <XAxis
                                 dataKey="t"
-                                tickFormatter={(value) => new Date(Number(value)).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' })}
+                                tickFormatter={(value) => {
+                                  const when = new Date(Number(value));
+                                  if (constituentChartRange === '1d') {
+                                    return when.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+                                  }
+                                  return when.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
+                                }}
                                 minTickGap={36}
                                 fontSize={10}
                                 tick={{ fill: '#8b98ad' }}
@@ -3294,7 +3304,13 @@ export default function App() {
                               />
                               <Tooltip
                                 contentStyle={{ backgroundColor: '#11151c', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', fontSize: '11px' }}
-                                labelFormatter={(value) => new Date(Number(value)).toLocaleDateString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' })}
+                                labelFormatter={(value) => {
+                                  const when = new Date(Number(value));
+                                  if (constituentChartRange === '1d' || constituentChartRange === '1w') {
+                                    return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+                                  }
+                                  return when.toLocaleDateString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
+                                }}
                                 formatter={(value: number | string) => [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', '종가']}
                               />
                               <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
