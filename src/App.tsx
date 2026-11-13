@@ -17,7 +17,7 @@ import {
   PieChart,
   X,
 } from 'lucide-react';
-import { ResponsiveContainer, LineChart, ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine } from 'recharts';
+import { ResponsiveContainer, LineChart, ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine, useXAxisScale, useYAxisScale } from 'recharts';
 import { AssetStats, MarketInsight, FuturesPosition, FuturesOrder, FuturesTrade, FuturesTrades24h, HistoricalSnapshot, FuturesIncome } from './types';
 import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
@@ -25,11 +25,11 @@ import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './serv
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
 const CONSTITUENT_CHART_RANGES = [
   { id: 'tick', label: '틱', kind: 'agg', ms: 0, interval: 'tick', limit: 400, bucketMs: 0, maxPages: 1 },
-  { id: '1min', label: '1분', kind: 'agg', ms: 60 * 1000, interval: '1s', limit: 1000, bucketMs: 1000, maxPages: 4 },
-  { id: '5min', label: '5분', kind: 'agg', ms: 5 * 60 * 1000, interval: '1s', limit: 1000, bucketMs: 1000, maxPages: 8 },
-  { id: '10min', label: '10분', kind: 'agg', ms: 10 * 60 * 1000, interval: '2s', limit: 1000, bucketMs: 2000, maxPages: 15 },
-  { id: '1h', label: '1시간', kind: 'kline', ms: 60 * 60 * 1000, interval: '1m', limit: 240, bucketMs: 0, maxPages: 1 },
-  { id: '4h', label: '4시간', kind: 'kline', ms: 4 * 60 * 60 * 1000, interval: '1m', limit: 240, bucketMs: 0, maxPages: 1 },
+  { id: '1min', label: '1분봉', kind: 'candle', ms: 241 * 60 * 1000, interval: '1m', limit: 240, bucketMs: 0, maxPages: 1 },
+  { id: '5min', label: '5분봉', kind: 'candle', ms: 289 * 5 * 60 * 1000, interval: '5m', limit: 288, bucketMs: 0, maxPages: 1 },
+  { id: '10min', label: '10분봉', kind: 'candle', ms: 217 * 10 * 60 * 1000, interval: '5m', limit: 432, bucketMs: 0, maxPages: 1 },
+  { id: '1h', label: '1시간봉', kind: 'candle', ms: 169 * 60 * 60 * 1000, interval: '1h', limit: 168, bucketMs: 0, maxPages: 1 },
+  { id: '4h', label: '4시간봉', kind: 'candle', ms: 181 * 4 * 60 * 60 * 1000, interval: '4h', limit: 180, bucketMs: 0, maxPages: 1 },
   { id: '1d', label: '1일', kind: 'kline', ms: 24 * 60 * 60 * 1000, interval: '15m', limit: 96, bucketMs: 0, maxPages: 1 },
   { id: '1w', label: '1주일', kind: 'kline', ms: 7 * 24 * 60 * 60 * 1000, interval: '1h', limit: 168, bucketMs: 0, maxPages: 1 },
   { id: '1m', label: '1개월', kind: 'kline', ms: 31 * 24 * 60 * 60 * 1000, interval: '1d', limit: 366, bucketMs: 0, maxPages: 1 },
@@ -43,26 +43,61 @@ type ConstituentChartRangeDef = typeof CONSTITUENT_CHART_RANGES[number];
 const constituentChartRangeById = (id: string): ConstituentChartRangeDef =>
   CONSTITUENT_CHART_RANGES.find((item) => item.id === id) || CONSTITUENT_CHART_RANGES[10];
 
+type ConstituentChartPoint = {
+  t: number;
+  price: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+};
+
 const constituentChartKey = (symbol: string, range: ConstituentChartRangeDef) =>
-  range.kind === 'agg' ? `${symbol}|agg|${range.id}` : `${symbol}|${range.interval}|${range.limit}`;
+  range.kind === 'kline' ? `${symbol}|${range.interval}|${range.limit}` : `${symbol}|${range.id}`;
+
+const klineRowsToPoints = (rows: any[], bucketMs = 0): ConstituentChartPoint[] => {
+  const buckets = new Map<number, ConstituentChartPoint>();
+  (Array.isArray(rows) ? rows : []).forEach((k) => {
+    const open = parseFloat(k[1]);
+    const high = parseFloat(k[2]);
+    const low = parseFloat(k[3]);
+    const close = parseFloat(k[4]);
+    const rawT = Number(k[0]);
+    if (![rawT, open, high, low, close].every((n) => Number.isFinite(n)) || close <= 0) return;
+    const t = bucketMs > 0 ? Math.floor(rawT / bucketMs) * bucketMs : rawT;
+    const prev = buckets.get(t);
+    if (!prev) {
+      buckets.set(t, { t, price: close, open, high, low, close });
+      return;
+    }
+    prev.high = Math.max(prev.high || high, high);
+    prev.low = Math.min(prev.low || low, low);
+    prev.close = close;
+    prev.price = close;
+  });
+  return Array.from(buckets.values()).sort((a, b) => a.t - b.t);
+};
 
 const formatConstituentAxis = (id: string, value: number) => {
   const when = new Date(value);
-  if (id === 'tick' || id === '1min' || id === '5min' || id === '10min') {
+  if (id === 'tick') {
     return when.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
   }
-  if (id === '1h' || id === '4h' || id === '1d') {
+  if (id === '1min' || id === '5min' || id === '10min' || id === '1d') {
     return when.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+  }
+  if (id === '1h' || id === '4h' || id === '1w') {
+    return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
   }
   return when.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
 };
 
 const formatConstituentTooltip = (id: string, value: number) => {
   const when = new Date(value);
-  if (id === 'tick' || id === '1min' || id === '5min' || id === '10min') {
+  if (id === 'tick') {
     return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
   }
-  if (id === '1h' || id === '4h' || id === '1d' || id === '1w') {
+  if (id === '1min' || id === '5min' || id === '10min' || id === '1h' || id === '4h' || id === '1d' || id === '1w') {
     return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
   }
   return when.toLocaleDateString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
@@ -143,6 +178,38 @@ const constituentFillSide = (row: FuturesTrade): 'LONG' | 'SHORT' => {
   if (pos === 'SHORT') return 'SHORT';
   if (pos === 'LONG') return 'LONG';
   return row.side === 'SELL' ? 'SHORT' : 'LONG';
+};
+
+const ConstituentCandles = ({ points }: { points: ConstituentChartPoint[] }) => {
+  const xScale = useXAxisScale();
+  const yScale = useYAxisScale();
+  if (!xScale || !yScale) return null;
+  return (
+    <g>
+      {points.map((point, index) => {
+        if (point.open == null || point.high == null || point.low == null || point.close == null) return null;
+        const x = xScale(point.t);
+        const yHigh = yScale(point.high);
+        const yLow = yScale(point.low);
+        const yOpen = yScale(point.open);
+        const yClose = yScale(point.close);
+        if (![x, yHigh, yLow, yOpen, yClose].every((n) => Number.isFinite(n))) return null;
+        const next = points[index + 1];
+        const gap = next ? Math.abs(xScale(next.t) - x) : 8;
+        const half = Math.max(1.2, Math.min(5, gap * 0.32));
+        const up = point.close >= point.open;
+        const color = up ? '#10b981' : '#f43f5e';
+        const top = Math.min(yOpen, yClose);
+        const height = Math.max(1, Math.abs(yClose - yOpen));
+        return (
+          <g key={point.t}>
+            <line x1={x} x2={x} y1={yHigh} y2={yLow} stroke={color} strokeWidth={1} />
+            <rect x={x - half} y={top} width={half * 2} height={height} fill={color} />
+          </g>
+        );
+      })}
+    </g>
+  );
 };
 
 const ConstituentFillArrow = (props: {
@@ -287,7 +354,7 @@ export default function App() {
   const [constituentTradesLoading, setConstituentTradesLoading] = useState(false);
   const [constituentTradesError, setConstituentTradesError] = useState<string | null>(null);
   const constituentTradesAtRef = useRef<Record<string, number>>({});
-  const [constituentKlines, setConstituentKlines] = useState<Record<string, { t: number; price: number }[]>>({});
+  const [constituentKlines, setConstituentKlines] = useState<Record<string, ConstituentChartPoint[]>>({});
   const [constituentKlinesLoading, setConstituentKlinesLoading] = useState(false);
   const [constituentChartRange, setConstituentChartRange] = useState<ConstituentChartRange>('6m');
   const [showConstituentOrders, setShowConstituentOrders] = useState(true);
@@ -2051,7 +2118,7 @@ export default function App() {
     const range = constituentChartRangeById(constituentChartRange);
     const key = constituentChartKey(symbol, range);
     const fetchedAt = constituentKlinesAtRef.current[key] || 0;
-    const freshFor = range.kind === 'agg' ? 15_000 : range.ms <= 4 * 60 * 60 * 1000 ? 60_000 : Number.POSITIVE_INFINITY;
+    const freshFor = range.kind === 'agg' ? 15_000 : range.kind === 'candle' ? 60_000 : Number.POSITIVE_INFINITY;
     if ((constituentKlinesRef.current[key] || []).length > 0 && Date.now() - fetchedAt < freshFor) return;
     let cancelled = false;
     setConstituentKlinesLoading(true);
@@ -2064,9 +2131,11 @@ export default function App() {
           limit: range.limit,
         })
       : BinanceService.getKlines(symbol, range.interval, range.limit).then((rows: any[]) =>
-          (Array.isArray(rows) ? rows : [])
-            .map((k) => ({ t: Number(k[0]), price: parseFloat(k[4]) }))
-            .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.price) && p.price > 0)
+          range.kind === 'candle'
+            ? klineRowsToPoints(rows, range.id === '10min' ? 10 * 60 * 1000 : 0)
+            : (Array.isArray(rows) ? rows : [])
+                .map((k) => ({ t: Number(k[0]), price: parseFloat(k[4]) }))
+                .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.price) && p.price > 0)
         );
     load
       .then((points) => {
@@ -2163,7 +2232,12 @@ export default function App() {
       .filter((row): row is { t: number; price: number; qty: number; side: 'LONG' | 'SHORT' } => row != null)
       .sort((a, b) => a.t - b.t)
       .slice(-1000);
-    const ys = points.map((p) => p.price).concat(fills.map((row) => row.price));
+    const ys = points
+      .reduce<number[]>((acc, point) => {
+        acc.push(point.low != null ? point.low : point.price, point.high != null ? point.high : point.price);
+        return acc;
+      }, [])
+      .concat(fills.map((row) => row.price));
     if (showConstituentOrders) ys.push(...orders.map((order) => order.price));
     let domain: [number, number] | undefined;
     if (ys.length > 0) {
@@ -3412,9 +3486,23 @@ export default function App() {
                               <Tooltip
                                 contentStyle={{ backgroundColor: '#11151c', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', fontSize: '11px' }}
                                 labelFormatter={(value) => formatConstituentTooltip(constituentChartRange, Number(value))}
-                                formatter={(value: number | string) => [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', constituentChartRangeById(constituentChartRange).kind === 'agg' ? '가격' : '종가']}
+                                formatter={(value: number | string, _name, item) => {
+                                  const point = item && item.payload ? item.payload as ConstituentChartPoint & { side?: string; qty?: number } : undefined;
+                                  if (point && point.open != null && point.high != null && point.low != null && point.close != null) {
+                                    return [`시 ${formatTickerPrice(point.open)}  고 ${formatTickerPrice(point.high)}  저 ${formatTickerPrice(point.low)}  종 ${formatTickerPrice(point.close)}`, '봉'];
+                                  }
+                                  const label = point && point.side ? (point.side === 'SHORT' ? '숏' : '롱') : constituentChartRangeById(constituentChartRange).kind === 'agg' ? '가격' : '종가';
+                                  return [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', label];
+                                }}
                               />
-                              <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                              {constituentChartRangeById(constituentChartRange).kind === 'candle' ? (
+                                <Line type="monotone" dataKey="price" stroke="transparent" dot={false} activeDot={false} strokeWidth={0} isAnimationActive={false} />
+                              ) : (
+                                <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                              )}
+                              {constituentChartRangeById(constituentChartRange).kind === 'candle' && (
+                                <ConstituentCandles points={constituentChart.points} />
+                              )}
                               {constituentChart.fills.length > 0 && (
                                 <Scatter data={constituentChart.fills} dataKey="price" shape={ConstituentFillArrow} isAnimationActive={false} />
                               )}
