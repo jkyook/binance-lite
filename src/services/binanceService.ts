@@ -106,6 +106,68 @@ export class BinanceService {
     }
   }
 
+  /** 최근 체결을 가격 점으로. bucketMs=0 이면 틱, 그 외에는 구간 마지막 가격. */
+  static async getAggPricePoints(
+    symbol: string,
+    opts: { startTime?: number; endTime?: number; bucketMs?: number; maxPages?: number; limit?: number }
+  ): Promise<Array<{ t: number; price: number }>> {
+    const bucketMs = opts.bucketMs || 0;
+    const maxPages = opts.maxPages || 1;
+    const limit = opts.limit || 1000;
+    const startTime = opts.startTime;
+    const endTime = opts.endTime;
+    const buckets = new Map<number, number>();
+    let fromId: number | undefined;
+    const upper = symbol.toUpperCase();
+    for (let page = 0; page < maxPages; page++) {
+      const params = new URLSearchParams();
+      params.set('symbol', upper);
+      params.set('limit', String(limit));
+      if (fromId != null) {
+        params.set('fromId', String(fromId));
+      } else if (startTime != null) {
+        params.set('startTime', String(startTime));
+        if (endTime != null) params.set('endTime', String(endTime));
+      }
+      let rows: Array<{ a?: number; p?: string; T?: number }> = [];
+      try {
+        const response = await fetch(`https://fapi.binance.com/fapi/v1/aggTrades?${params}`);
+        if (response.ok) {
+          rows = await response.json();
+        } else {
+          const spot = await fetch(`https://api.binance.com/api/v3/aggTrades?${params}`);
+          if (!spot.ok) break;
+          rows = await spot.json();
+        }
+      } catch (e) {
+        console.warn(`Could not reach Binance aggTrades for ${symbol}:`, e);
+        break;
+      }
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      let passedEnd = false;
+      for (const row of rows) {
+        const t = Number(row.T);
+        const price = parseFloat(row.p || '');
+        if (!Number.isFinite(t) || !Number.isFinite(price) || price <= 0) continue;
+        if (startTime != null && t < startTime) continue;
+        if (endTime != null && t > endTime) {
+          passedEnd = true;
+          break;
+        }
+        const bucket = bucketMs > 0 ? Math.floor(t / bucketMs) * bucketMs : t;
+        buckets.set(bucket, price);
+      }
+      const latestOnly = fromId == null && startTime == null;
+      if (rows.length < limit || passedEnd || latestOnly) break;
+      const lastId = Number(rows[rows.length - 1].a);
+      if (!Number.isFinite(lastId)) break;
+      fromId = lastId + 1;
+    }
+    return Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, price]) => ({ t, price }));
+  }
+
   static async getPrice(symbol: string): Promise<string> {
     try {
       const response = await fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol.toUpperCase()}`);

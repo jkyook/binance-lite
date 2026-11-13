@@ -24,14 +24,49 @@ import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './serv
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
 const CONSTITUENT_CHART_RANGES = [
-  { id: '1d', label: '1일', days: 1, interval: '15m', limit: 96 },
-  { id: '1w', label: '1주일', days: 7, interval: '1h', limit: 168 },
-  { id: '1m', label: '1개월', days: 31, interval: '1d', limit: 366 },
-  { id: '3m', label: '3개월', days: 92, interval: '1d', limit: 366 },
-  { id: '6m', label: '6개월', days: 183, interval: '1d', limit: 366 },
-  { id: '1y', label: '1년', days: 366, interval: '1d', limit: 366 },
+  { id: 'tick', label: '틱', kind: 'agg', ms: 0, interval: 'tick', limit: 400, bucketMs: 0, maxPages: 1 },
+  { id: '1min', label: '1분', kind: 'agg', ms: 60 * 1000, interval: '1s', limit: 1000, bucketMs: 1000, maxPages: 4 },
+  { id: '5min', label: '5분', kind: 'agg', ms: 5 * 60 * 1000, interval: '1s', limit: 1000, bucketMs: 1000, maxPages: 8 },
+  { id: '10min', label: '10분', kind: 'agg', ms: 10 * 60 * 1000, interval: '2s', limit: 1000, bucketMs: 2000, maxPages: 15 },
+  { id: '1h', label: '1시간', kind: 'kline', ms: 60 * 60 * 1000, interval: '1m', limit: 240, bucketMs: 0, maxPages: 1 },
+  { id: '4h', label: '4시간', kind: 'kline', ms: 4 * 60 * 60 * 1000, interval: '1m', limit: 240, bucketMs: 0, maxPages: 1 },
+  { id: '1d', label: '1일', kind: 'kline', ms: 24 * 60 * 60 * 1000, interval: '15m', limit: 96, bucketMs: 0, maxPages: 1 },
+  { id: '1w', label: '1주일', kind: 'kline', ms: 7 * 24 * 60 * 60 * 1000, interval: '1h', limit: 168, bucketMs: 0, maxPages: 1 },
+  { id: '1m', label: '1개월', kind: 'kline', ms: 31 * 24 * 60 * 60 * 1000, interval: '1d', limit: 366, bucketMs: 0, maxPages: 1 },
+  { id: '3m', label: '3개월', kind: 'kline', ms: 92 * 24 * 60 * 60 * 1000, interval: '1d', limit: 366, bucketMs: 0, maxPages: 1 },
+  { id: '6m', label: '6개월', kind: 'kline', ms: 183 * 24 * 60 * 60 * 1000, interval: '1d', limit: 366, bucketMs: 0, maxPages: 1 },
+  { id: '1y', label: '1년', kind: 'kline', ms: 366 * 24 * 60 * 60 * 1000, interval: '1d', limit: 366, bucketMs: 0, maxPages: 1 },
 ] as const;
 type ConstituentChartRange = typeof CONSTITUENT_CHART_RANGES[number]['id'];
+type ConstituentChartRangeDef = typeof CONSTITUENT_CHART_RANGES[number];
+
+const constituentChartRangeById = (id: string): ConstituentChartRangeDef =>
+  CONSTITUENT_CHART_RANGES.find((item) => item.id === id) || CONSTITUENT_CHART_RANGES[10];
+
+const constituentChartKey = (symbol: string, range: ConstituentChartRangeDef) =>
+  range.kind === 'agg' ? `${symbol}|agg|${range.id}` : `${symbol}|${range.interval}|${range.limit}`;
+
+const formatConstituentAxis = (id: string, value: number) => {
+  const when = new Date(value);
+  if (id === 'tick' || id === '1min' || id === '5min' || id === '10min') {
+    return when.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+  }
+  if (id === '1h' || id === '4h' || id === '1d') {
+    return when.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+  }
+  return when.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
+};
+
+const formatConstituentTooltip = (id: string, value: number) => {
+  const when = new Date(value);
+  if (id === 'tick' || id === '1min' || id === '5min' || id === '10min') {
+    return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+  }
+  if (id === '1h' || id === '4h' || id === '1d' || id === '1w') {
+    return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
+  }
+  return when.toLocaleDateString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
+};
 // 브라우저 탭 제목에 표시할 BTC 시세 (USDC 마켓)
 const TITLE_SYMBOL = 'BTCUSDC';
 // USD-M 주문 한도 300건/10초, 1200건/분. 450ms면 약 22건/10초라 한도에 닿지 않는다.
@@ -223,6 +258,7 @@ export default function App() {
   const [constituentKlinesLoading, setConstituentKlinesLoading] = useState(false);
   const [constituentChartRange, setConstituentChartRange] = useState<ConstituentChartRange>('6m');
   const constituentKlinesRef = useRef(constituentKlines);
+  const constituentKlinesAtRef = useRef<Record<string, number>>({});
   const [selectedOpenOrderKey, setSelectedOpenOrderKey] = useState<string | null>(null);
   const [cancellingOrderKey, setCancellingOrderKey] = useState<string | null>(null);
   const [placingBuyOrderKey, setPlacingBuyOrderKey] = useState<string | null>(null);
@@ -1978,18 +2014,31 @@ export default function App() {
   useEffect(() => {
     const symbol = constituentSymbol;
     if (!symbol) return;
-    const range = CONSTITUENT_CHART_RANGES.find((item) => item.id === constituentChartRange) || CONSTITUENT_CHART_RANGES[4];
-    const key = symbol + '|' + range.interval;
-    if ((constituentKlinesRef.current[key] || []).length > 0) return;
+    const range = constituentChartRangeById(constituentChartRange);
+    const key = constituentChartKey(symbol, range);
+    const fetchedAt = constituentKlinesAtRef.current[key] || 0;
+    const freshFor = range.kind === 'agg' ? 15_000 : range.ms <= 4 * 60 * 60 * 1000 ? 60_000 : Number.POSITIVE_INFINITY;
+    if ((constituentKlinesRef.current[key] || []).length > 0 && Date.now() - fetchedAt < freshFor) return;
     let cancelled = false;
     setConstituentKlinesLoading(true);
-    BinanceService.getKlines(symbol, range.interval, range.limit)
-      .then((rows: any[]) => {
+    const load = range.kind === 'agg'
+      ? BinanceService.getAggPricePoints(symbol, {
+          startTime: range.ms > 0 ? Date.now() - range.ms : undefined,
+          endTime: range.ms > 0 ? Date.now() : undefined,
+          bucketMs: range.bucketMs,
+          maxPages: range.maxPages,
+          limit: range.limit,
+        })
+      : BinanceService.getKlines(symbol, range.interval, range.limit).then((rows: any[]) =>
+          (Array.isArray(rows) ? rows : [])
+            .map((k) => ({ t: Number(k[0]), price: parseFloat(k[4]) }))
+            .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.price) && p.price > 0)
+        );
+    load
+      .then((points) => {
         if (cancelled) return;
-        const points = (Array.isArray(rows) ? rows : [])
-          .map((k) => ({ t: Number(k[0]), price: parseFloat(k[4]) }))
-          .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.price) && p.price > 0);
         if (points.length > 0) {
+          constituentKlinesAtRef.current[key] = Date.now();
           setConstituentKlines((prev) => ({ ...prev, [key]: points }));
         }
       })
@@ -2045,9 +2094,9 @@ export default function App() {
 
   const constituentChart = useMemo(() => {
     if (!constituentSymbol) return null;
-    const range = CONSTITUENT_CHART_RANGES.find((item) => item.id === constituentChartRange) || CONSTITUENT_CHART_RANGES[4];
-    const cutoff = Date.now() - range.days * 24 * 60 * 60 * 1000;
-    const points = (constituentKlines[constituentSymbol + '|' + range.interval] || []).filter((point) => point.t >= cutoff);
+    const range = constituentChartRangeById(constituentChartRange);
+    const cutoff = range.ms > 0 ? Date.now() - range.ms : 0;
+    const points = (constituentKlines[constituentChartKey(constituentSymbol, range)] || []).filter((point) => cutoff <= 0 || point.t >= cutoff);
     const grouped = new Map<string, { side: string; price: number; qty: number }>();
     openOrders.forEach((order) => {
       if (order.symbol !== constituentSymbol) return;
@@ -3284,13 +3333,7 @@ export default function App() {
                               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
                               <XAxis
                                 dataKey="t"
-                                tickFormatter={(value) => {
-                                  const when = new Date(Number(value));
-                                  if (constituentChartRange === '1d') {
-                                    return when.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
-                                  }
-                                  return when.toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
-                                }}
+                                tickFormatter={(value) => formatConstituentAxis(constituentChartRange, Number(value))}
                                 minTickGap={36}
                                 fontSize={10}
                                 tick={{ fill: '#8b98ad' }}
@@ -3304,14 +3347,8 @@ export default function App() {
                               />
                               <Tooltip
                                 contentStyle={{ backgroundColor: '#11151c', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', fontSize: '11px' }}
-                                labelFormatter={(value) => {
-                                  const when = new Date(Number(value));
-                                  if (constituentChartRange === '1d' || constituentChartRange === '1w') {
-                                    return when.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' });
-                                  }
-                                  return when.toLocaleDateString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'Asia/Seoul' });
-                                }}
-                                formatter={(value: number | string) => [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', '종가']}
+                                labelFormatter={(value) => formatConstituentTooltip(constituentChartRange, Number(value))}
+                                formatter={(value: number | string) => [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', constituentChartRangeById(constituentChartRange).kind === 'agg' ? '가격' : '종가']}
                               />
                               <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
                               {constituentChart.orders.map((order) => {
