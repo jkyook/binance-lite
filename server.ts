@@ -108,12 +108,6 @@ const TelegramSendSchema = z.object({
 
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET;
-// KORU 전용 서브계정 키(2026-11-13 사용자 지시 "binance-lite 대시보드와
-// 분리해서 구현") — hanto/lssec(binance_koru.py, 신뢰 IP로 식별)가 쓰는
-// /futures/order·account·positions·open-orders·listen-key만 이 키를 쓰고,
-// 브라우저 대시보드(로그인 세션)는 기존 BINANCE_API_KEY를 그대로 쓴다.
-const BINANCE_API_KEY_KORU = process.env.BINANCE_API_KEY_KORU || BINANCE_API_KEY;
-const BINANCE_API_SECRET_KORU = process.env.BINANCE_API_SECRET_KORU || BINANCE_API_SECRET;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 function readSecret(name: string): string {
@@ -127,23 +121,6 @@ function readSecret(name: string): string {
   return raw;
 }
 const ORDER_PIN = readSecret("ORDER_PIN");
-
-// 같은 VPC 내부의 자동매매 호스트(hanto/lssec)는 보안그룹으로 이미 접근이
-// 제한돼 있어(이 포트에 도달 가능한 소스 = 이 두 호스트뿐) 로그인 세션/PIN
-// 없이도 API를 쓸 수 있게 한다 — 2026-11-13 사용자 지시("BINANCE_LITE_ORDER_PIN
-// 없이 구현되도록 해줘"). 브라우저 로그인(사람이 쓰는 UI)은 그대로 PIN 유지.
-// req.ip는 express가 TCP 소켓에서 직접 읽어(trust proxy 미설정) 클라이언트가
-// 보내는 x-forwarded-for 등으로 위조 불가.
-const INTERNAL_API_TRUSTED_IPS = new Set(
-  (process.env.INTERNAL_API_TRUSTED_IPS || "172.31.48.84,172.31.49.221")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean)
-);
-function isTrustedInternalCaller(req: express.Request): boolean {
-  const ip = String(req.ip || "").replace(/^::ffff:/, "");
-  return INTERNAL_API_TRUSTED_IPS.has(ip);
-}
 
 const BASE_URL = "https://fapi.binance.com";
 const SPOT_BASE_URL = "https://api.binance.com";
@@ -481,10 +458,7 @@ async function lookupJupiterSymbols(mints: string[]): Promise<void> {
 }
 
 function requireOrderPin(req: express.Request, res: express.Response): boolean {
-  // 2026-11-13 사용자 지시("신뢰 IP면 PIN 없이 주문도 허용") — 보안그룹이
-  // 이미 c8i_bro/c8i 둘만 이 포트에 도달 가능하도록 막아둔 상태라, 그 두
-  // 호스트에서 온 요청은 자동매매 서버-서버 호출로 간주해 PIN을 요구하지 않는다.
-  if (hasValidSession(req) || isTrustedInternalCaller(req)) return true;
+  if (hasValidSession(req)) return true;
   if (!ORDER_PIN) {
     res.status(503).json({ error: "ORDER_PIN이 설정되지 않아 주문이 차단되었습니다." });
     return false;
@@ -709,7 +683,7 @@ async function startServer() {
   });
 
   app.use("/api", (req, res, next) => {
-    if (hasValidSession(req) || isTrustedInternalCaller(req)) {
+    if (hasValidSession(req)) {
       next();
       return;
     }
@@ -1035,8 +1009,7 @@ async function startServer() {
       if (price !== undefined) params.price = price;
       if (type === "LIMIT") params.timeInForce = "GTC";
 
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/order", "POST", params, { keyPair });
+      const data = await binanceRequest("/fapi/v1/order", "POST", params);
       res.json(data);
     } catch (err: any) {
       console.error("[Order Error]", err.message);
@@ -1067,8 +1040,7 @@ async function startServer() {
         quantity: quantity.toString(),
         price,
       };
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/order", "PUT", params, { keyPair });
+      const data = await binanceRequest("/fapi/v1/order", "PUT", params);
       res.json(data);
     } catch (err: any) {
       console.error("[Modify Order Error]", err.message);
@@ -1091,8 +1063,7 @@ async function startServer() {
         orderId: orderId.toString(),
       };
 
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/order", "DELETE", params, { keyPair });
+      const data = await binanceRequest("/fapi/v1/order", "DELETE", params);
       res.json(data);
     } catch (err: any) {
       console.error("[Cancel Order Error]", err.message);
@@ -1115,8 +1086,7 @@ async function startServer() {
         orderId: orderId.toString(),
       };
 
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/order", "DELETE", params, { keyPair });
+      const data = await binanceRequest("/fapi/v1/order", "DELETE", params);
       res.json(data);
     } catch (err: any) {
       console.error("[Cancel Order Error]", err.message);
@@ -1126,8 +1096,7 @@ async function startServer() {
 
   apiRouter.get("/futures/account", async (req, res) => {
     try {
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v2/account", "GET", {}, { keyPair });
+      const data = await binanceRequest("/fapi/v2/account");
       res.json(data);
     } catch (err: any) {
       sendApiError(res, err);
@@ -1136,8 +1105,7 @@ async function startServer() {
 
   apiRouter.get("/futures/positions", async (req, res) => {
     try {
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v2/positionRisk", "GET", {}, { keyPair });
+      const data = await binanceRequest("/fapi/v2/positionRisk");
       res.json(data);
     } catch (err: any) {
       sendApiError(res, err);
@@ -1146,31 +1114,7 @@ async function startServer() {
 
   apiRouter.get("/futures/open-orders", async (req, res) => {
     try {
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/openOrders", "GET", {}, { keyPair });
-      res.json(data);
-    } catch (err: any) {
-      sendApiError(res, err);
-    }
-  });
-
-  /** 외부 자동매매(hanto/lssec)가 유저데이터 WS를 직접 구독하기 위한 listenKey 발급/연장 프록시.
-   * 시크릿은 이 서버에만 두고, 호출자는 세션쿠키로만 접근한다. KORU 전용
-   * 서브계정 키 사용(2026-11-13, 대시보드 계정과 분리). */
-  apiRouter.post("/futures/listen-key", async (req, res) => {
-    try {
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/listenKey", "POST", {}, { keyPair });
-      res.json(data);
-    } catch (err: any) {
-      sendApiError(res, err);
-    }
-  });
-
-  apiRouter.put("/futures/listen-key", async (req, res) => {
-    try {
-      const keyPair = isTrustedInternalCaller(req) ? "koru" : "default";
-      const data = await binanceRequest("/fapi/v1/listenKey", "PUT", {}, { keyPair });
+      const data = await binanceRequest("/fapi/v1/openOrders");
       res.json(data);
     } catch (err: any) {
       sendApiError(res, err);
@@ -1724,7 +1668,7 @@ async function startServer() {
     endpoint: string,
     method: string = "GET",
     params: Record<string, string> = {},
-    opts?: { baseUrl?: string; keyPair?: "default" | "koru" }
+    opts?: { baseUrl?: string }
   ) {
     const baseUrl = opts?.baseUrl || BASE_URL;
     if (Date.now() < binanceBanUntil) {
@@ -1735,28 +1679,21 @@ async function startServer() {
       throw error;
     }
 
-    const useKoru = opts?.keyPair === "koru";
-    const apiKey = useKoru ? BINANCE_API_KEY_KORU : BINANCE_API_KEY;
-    const apiSecret = useKoru ? BINANCE_API_SECRET_KORU : BINANCE_API_SECRET;
-    if (!apiKey || !apiSecret) {
-      throw new Error(
-        useKoru
-          ? "BINANCE_API_KEY_KORU and BINANCE_API_SECRET_KORU are required"
-          : "BINANCE_API_KEY and BINANCE_API_SECRET are required"
-      );
+    if (!BINANCE_API_KEY || !BINANCE_API_SECRET) {
+      throw new Error("BINANCE_API_KEY and BINANCE_API_SECRET are required");
     }
 
     const timestamp = Date.now().toString();
     const signParams = new URLSearchParams({ ...params, timestamp, recvWindow: "60000" });
     const signature = crypto
-      .createHmac("sha256", apiSecret)
+      .createHmac("sha256", BINANCE_API_SECRET)
       .update(signParams.toString())
       .digest("hex");
 
     const rateG = rateGroupOf(baseUrl);
     await rateAcquire(rateG, endpoint, method, endpointWeight(endpoint, method, params));
 
-    console.log(`[Binance Request] ${method} ${baseUrl}${endpoint} (key=${useKoru ? "koru" : "default"}, params: ${JSON.stringify(params)})`);
+    console.log(`[Binance Request] ${method} ${baseUrl}${endpoint} (with params: ${JSON.stringify(params)})`);
 
     let url: string;
     let fetchOptions: RequestInit;
@@ -1766,7 +1703,7 @@ async function startServer() {
       url = `${baseUrl}${endpoint}?${signParams.toString()}&signature=${signature}`;
       fetchOptions = {
         method,
-        headers: { "X-MBX-APIKEY": apiKey },
+        headers: { "X-MBX-APIKEY": BINANCE_API_KEY },
       };
     } else {
       // For POST/PUT: send params in the request body (application/x-www-form-urlencoded)
@@ -1776,7 +1713,7 @@ async function startServer() {
       fetchOptions = {
         method,
         headers: {
-          "X-MBX-APIKEY": apiKey,
+          "X-MBX-APIKEY": BINANCE_API_KEY,
           "Content-Type": "application/x-www-form-urlencoded",
         },
         body: bodyParams.toString(),
