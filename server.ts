@@ -90,6 +90,14 @@ const OrderSchema = z
     }
   });
 
+const ModifyOrderSchema = z.object({
+  symbol: SymbolSchema,
+  orderId: z.union([z.number(), z.string()]),
+  side: z.enum(["BUY", "SELL"]),
+  quantity: QuantitySchema,
+  price: PriceSchema,
+});
+
 const BatchOrderSchema = z.object({
   orders: z.array(OrderSchema).min(1, "orders는 최소 1건 이상이어야 합니다."),
 });
@@ -113,6 +121,24 @@ function readSecret(name: string): string {
   return raw;
 }
 const ORDER_PIN = readSecret("ORDER_PIN");
+
+// 같은 VPC 내부의 자동매매 호스트(hanto/lssec)는 보안그룹으로 이미 접근이
+// 제한돼 있어(이 포트에 도달 가능한 소스 = 이 두 호스트뿐) 로그인 세션/PIN
+// 없이도 API를 쓸 수 있게 한다 — 2026-11-13 사용자 지시("BINANCE_LITE_ORDER_PIN
+// 없이 구현되도록 해줘"). 브라우저 로그인(사람이 쓰는 UI)은 그대로 PIN 유지.
+// req.ip는 express가 TCP 소켓에서 직접 읽어(trust proxy 미설정) 클라이언트가
+// 보내는 x-forwarded-for 등으로 위조 불가.
+const INTERNAL_API_TRUSTED_IPS = new Set(
+  (process.env.INTERNAL_API_TRUSTED_IPS || "172.31.48.84,172.31.49.221")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+function isTrustedInternalCaller(req: express.Request): boolean {
+  const ip = String(req.ip || "").replace(/^::ffff:/, "");
+  return INTERNAL_API_TRUSTED_IPS.has(ip);
+}
+
 const BASE_URL = "https://fapi.binance.com";
 const SPOT_BASE_URL = "https://api.binance.com";
 const BAN_FILE = path.join(process.cwd(), "data", "binance_ban_until");
@@ -449,7 +475,10 @@ async function lookupJupiterSymbols(mints: string[]): Promise<void> {
 }
 
 function requireOrderPin(req: express.Request, res: express.Response): boolean {
-  if (hasValidSession(req)) return true;
+  // 2026-11-13 사용자 지시("신뢰 IP면 PIN 없이 주문도 허용") — 보안그룹이
+  // 이미 c8i_bro/c8i 둘만 이 포트에 도달 가능하도록 막아둔 상태라, 그 두
+  // 호스트에서 온 요청은 자동매매 서버-서버 호출로 간주해 PIN을 요구하지 않는다.
+  if (hasValidSession(req) || isTrustedInternalCaller(req)) return true;
   if (!ORDER_PIN) {
     res.status(503).json({ error: "ORDER_PIN이 설정되지 않아 주문이 차단되었습니다." });
     return false;
@@ -674,7 +703,7 @@ async function startServer() {
   });
 
   app.use("/api", (req, res, next) => {
-    if (hasValidSession(req)) {
+    if (hasValidSession(req) || isTrustedInternalCaller(req)) {
       next();
       return;
     }
@@ -1008,6 +1037,37 @@ async function startServer() {
     }
   });
 
+  /** 지정가 미체결 주문의 가격/수량만 변경(취소 없이) — Binance Futures
+   * "Modify Order"(PUT /fapi/v1/order). LIMIT 주문에만 적용 가능. */
+  apiRouter.put("/futures/order", async (req, res) => {
+    if (!requireOrderPin(req, res)) return;
+    console.log("[Route Hit] PUT /api/futures/order");
+    const parsed = ModifyOrderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map(i => `${i.path.join(".") || "body"}: ${i.message}`);
+      res.status(400).json({ error: `요청 검증 실패: ${issues.join("; ")}` });
+      return;
+    }
+    try {
+      const { symbol, orderId, side, quantity, price } = parsed.data;
+      if (Date.now() < tradingRestrictedUntil) {
+        throw quantRestrictionError();
+      }
+      const params: Record<string, string> = {
+        symbol,
+        orderId: orderId.toString(),
+        side,
+        quantity: quantity.toString(),
+        price,
+      };
+      const data = await binanceRequest("/fapi/v1/order", "PUT", params);
+      res.json(data);
+    } catch (err: any) {
+      console.error("[Modify Order Error]", err.message);
+      sendApiError(res, err);
+    }
+  });
+
   apiRouter.delete("/futures/order", async (req, res) => {
     if (!requireOrderPin(req, res)) return;
     console.log("[Route Hit] DELETE /api/futures/order");
@@ -1075,6 +1135,26 @@ async function startServer() {
   apiRouter.get("/futures/open-orders", async (req, res) => {
     try {
       const data = await binanceRequest("/fapi/v1/openOrders");
+      res.json(data);
+    } catch (err: any) {
+      sendApiError(res, err);
+    }
+  });
+
+  /** 외부 자동매매(hanto/lssec)가 유저데이터 WS를 직접 구독하기 위한 listenKey 발급/연장 프록시.
+   * 시크릿은 이 서버에만 두고, 호출자는 세션쿠키로만 접근한다. */
+  apiRouter.post("/futures/listen-key", async (req, res) => {
+    try {
+      const data = await binanceRequest("/fapi/v1/listenKey", "POST");
+      res.json(data);
+    } catch (err: any) {
+      sendApiError(res, err);
+    }
+  });
+
+  apiRouter.put("/futures/listen-key", async (req, res) => {
+    try {
+      const data = await binanceRequest("/fapi/v1/listenKey", "PUT");
       res.json(data);
     } catch (err: any) {
       sendApiError(res, err);
