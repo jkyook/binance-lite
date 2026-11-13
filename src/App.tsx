@@ -17,7 +17,7 @@ import {
   PieChart,
   X,
 } from 'lucide-react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine } from 'recharts';
+import { ResponsiveContainer, LineChart, ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine } from 'recharts';
 import { AssetStats, MarketInsight, FuturesPosition, FuturesOrder, FuturesTrade, FuturesTrades24h, HistoricalSnapshot, FuturesIncome } from './types';
 import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
@@ -134,6 +134,39 @@ const formatTickerPrice = (raw?: string | number | null) => {
   const abs = Math.abs(v);
   const digits = abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
   return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: digits });
+};
+
+const CONSTITUENT_FILL_WEEK_MS = 7 * 24 * 60 * 60 * 1000 - 1000;
+
+const constituentFillSide = (row: FuturesTrade): 'LONG' | 'SHORT' => {
+  const pos = String((row as FuturesTrade & { positionSide?: string }).positionSide || '').toUpperCase();
+  if (pos === 'SHORT') return 'SHORT';
+  if (pos === 'LONG') return 'LONG';
+  return row.side === 'SELL' ? 'SHORT' : 'LONG';
+};
+
+const ConstituentFillArrow = (props: {
+  cx?: number;
+  cy?: number;
+  payload?: { side?: string; qty?: number; price?: number; t?: number };
+}) => {
+  const cx = props.cx;
+  const cy = props.cy;
+  if (cx == null || cy == null || !Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+  const long = props.payload?.side !== 'SHORT';
+  const color = long ? '#10b981' : '#f43f5e';
+  const price = formatTickerPrice(props.payload?.price);
+  const when = props.payload?.t ? formatSeoulTime(props.payload.t) : '';
+  const tip = `${long ? '롱' : '숏'} ${formatQty(props.payload?.qty || 0)}${price ? ` @ $${price}` : ''}${when ? ` ${when}` : ''}`;
+  const d = long
+    ? `M ${cx} ${cy} L ${cx - 5} ${cy + 10} L ${cx - 1.7} ${cy + 10} L ${cx - 1.7} ${cy + 15} L ${cx + 1.7} ${cy + 15} L ${cx + 1.7} ${cy + 10} L ${cx + 5} ${cy + 10} Z`
+    : `M ${cx} ${cy} L ${cx - 5} ${cy - 10} L ${cx - 1.7} ${cy - 10} L ${cx - 1.7} ${cy - 15} L ${cx + 1.7} ${cy - 15} L ${cx + 1.7} ${cy - 10} L ${cx + 5} ${cy - 10} Z`;
+  return (
+    <g>
+      <title>{tip}</title>
+      <path d={d} fill={color} stroke={color} strokeWidth={0.6} />
+    </g>
+  );
 };
 
 /** KPI: 위 USD, 아래 KRW */
@@ -257,6 +290,7 @@ export default function App() {
   const [constituentKlines, setConstituentKlines] = useState<Record<string, { t: number; price: number }[]>>({});
   const [constituentKlinesLoading, setConstituentKlinesLoading] = useState(false);
   const [constituentChartRange, setConstituentChartRange] = useState<ConstituentChartRange>('6m');
+  const [showConstituentOrders, setShowConstituentOrders] = useState(true);
   const constituentKlinesRef = useRef(constituentKlines);
   const constituentKlinesAtRef = useRef<Record<string, number>>({});
   const [selectedOpenOrderKey, setSelectedOpenOrderKey] = useState<string | null>(null);
@@ -1962,12 +1996,12 @@ export default function App() {
     setConstituentTradesLoading(true);
     setConstituentTradesError(null);
     const endTime = Date.now();
-    const startTime = endTime - 24 * 60 * 60 * 1000;
+    const startTime = endTime - CONSTITUENT_FILL_WEEK_MS;
     (async () => {
       const all: FuturesTrade[] = [];
       const seen = new Set<number>();
       let fromId: number | undefined;
-      for (let page = 0; page < 6; page++) {
+      for (let page = 0; page < 8; page++) {
         const batch = await BinanceService.getFuturesTrades(symbol, {
           startTime,
           endTime,
@@ -2070,8 +2104,8 @@ export default function App() {
           return (amt > 0 && order.side === 'SELL') || (amt < 0 && order.side === 'BUY');
         })
       : [];
-    const tradesForSymbol = constituentTrades[constituentSymbol] || [];
     const since24h = Date.now() - 24 * 60 * 60 * 1000;
+    const tradesForSymbol = (constituentTrades[constituentSymbol] || []).filter((row) => (row.time || 0) >= since24h);
     const incomeFallback = tradesForSymbol.length
       ? []
       : incomeHistory
@@ -2114,7 +2148,23 @@ export default function App() {
       else grouped.set(key, { side, price, qty });
     });
     const orders = Array.from(grouped.values()).sort((a, b) => a.price - b.price);
-    const ys = points.map((p) => p.price).concat(orders.map((o) => o.price));
+    const weekAgo = Date.now() - CONSTITUENT_FILL_WEEK_MS;
+    const windowStart = points.length > 0 ? Math.max(points[0].t, weekAgo) : weekAgo;
+    const windowEnd = points.length > 0 ? points[points.length - 1].t : Date.now();
+    const fills = (constituentTrades[constituentSymbol] || [])
+      .map((row) => {
+        const t = Number(row.time) || 0;
+        const price = parseFloat(row.price);
+        const qty = parseFloat(row.qty);
+        if (t < windowStart || t > windowEnd) return null;
+        if (!Number.isFinite(price) || price <= 0) return null;
+        return { t, price, qty: Number.isFinite(qty) ? qty : 0, side: constituentFillSide(row) };
+      })
+      .filter((row): row is { t: number; price: number; qty: number; side: 'LONG' | 'SHORT' } => row != null)
+      .sort((a, b) => a.t - b.t)
+      .slice(-1000);
+    const ys = points.map((p) => p.price).concat(fills.map((row) => row.price));
+    if (showConstituentOrders) ys.push(...orders.map((order) => order.price));
     let domain: [number, number] | undefined;
     if (ys.length > 0) {
       const lo = Math.min.apply(null, ys);
@@ -2122,8 +2172,11 @@ export default function App() {
       const pad = hi > lo ? (hi - lo) * 0.08 : hi * 0.02;
       domain = [lo - pad, hi + pad];
     }
-    return { points, orders, domain };
-  }, [constituentSymbol, constituentKlines, constituentChartRange, openOrders]);
+    const xDomain: [number, number] | undefined = points.length
+      ? [points[0].t, Math.max(points[points.length - 1].t, points[0].t + 1)]
+      : undefined;
+    return { points, orders, fills, domain, xDomain };
+  }, [constituentSymbol, constituentKlines, constituentChartRange, openOrders, constituentTrades, showConstituentOrders]);
 
   const openOrderTotals = useMemo(() => {
     return openOrders.reduce(
@@ -3306,7 +3359,16 @@ export default function App() {
                   </div>
                   <div className="panel flex min-h-[340px] min-w-0 flex-1 flex-col p-4 shadow-2xl">
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <div className="metric-label">가격 · 미체결</div>
+                      <div className="flex items-center gap-1">
+                        <div className="metric-label">가격</div>
+                        <button
+                          type="button"
+                          onClick={() => setShowConstituentOrders((on) => !on)}
+                          className={`rounded px-1.5 py-0.5 text-[10px] ${showConstituentOrders ? 'bg-accent/25 text-white' : 'text-ink-400 hover:text-white'}`}
+                        >
+                          미체결
+                        </button>
+                      </div>
                       <div className="flex flex-wrap justify-end gap-1">
                         {CONSTITUENT_CHART_RANGES.map((range) => {
                           const on = range.id === constituentChartRange;
@@ -3329,10 +3391,12 @@ export default function App() {
                       <>
                         <div className="h-[360px] w-full">
                           <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={constituentChart.points} margin={{ top: 16, right: 12, left: 0, bottom: 0 }}>
+                            <ComposedChart data={constituentChart.points} margin={{ top: 16, right: 12, left: 0, bottom: 0 }}>
                               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
                               <XAxis
+                                type="number"
                                 dataKey="t"
+                                domain={constituentChart.xDomain}
                                 tickFormatter={(value) => formatConstituentAxis(constituentChartRange, Number(value))}
                                 minTickGap={36}
                                 fontSize={10}
@@ -3351,7 +3415,10 @@ export default function App() {
                                 formatter={(value: number | string) => [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', constituentChartRangeById(constituentChartRange).kind === 'agg' ? '가격' : '종가']}
                               />
                               <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
-                              {constituentChart.orders.map((order) => {
+                              {constituentChart.fills.length > 0 && (
+                                <Scatter data={constituentChart.fills} dataKey="price" shape={ConstituentFillArrow} isAnimationActive={false} />
+                              )}
+                              {showConstituentOrders && constituentChart.orders.map((order) => {
                                 const buy = order.side === 'BUY';
                                 const color = buy ? '#10b981' : '#f43f5e';
                                 const text = `${buy ? '매수' : '매도'} ${formatQty(order.qty)}`;
@@ -3381,12 +3448,17 @@ export default function App() {
                                   />
                                 );
                               })}
-                            </LineChart>
+                            </ComposedChart>
                           </ResponsiveContainer>
                         </div>
-                        {constituentChart.orders.length === 0 && (
-                          <div className="mt-2 text-[11px] text-ink-500">이 종목의 미체결 주문이 없습니다.</div>
-                        )}
+                        <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-ink-500">
+                          <span className="text-ok">▲ 롱</span>
+                          <span className="text-danger">▼ 숏</span>
+                          <span>체결은 최근 1주일</span>
+                          {showConstituentOrders && constituentChart.orders.length === 0 && (
+                            <span>이 종목의 미체결 주문이 없습니다.</span>
+                          )}
+                        </div>
                       </>
                     ) : (
                       <div className="text-[11px] text-ink-500">가격을 불러오지 못했습니다.</div>
