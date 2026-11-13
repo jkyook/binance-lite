@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -17,7 +17,7 @@ import {
   PieChart,
   X,
 } from 'lucide-react';
-import { ResponsiveContainer, LineChart, ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine, useXAxisScale, useYAxisScale } from 'recharts';
+import { ResponsiveContainer, LineChart, ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, CartesianGrid, PieChart as RePieChart, Pie, Cell, Legend, ReferenceLine, useXAxisScale, useYAxisScale, useXAxisInverseScale, useYAxisInverseScale, usePlotArea } from 'recharts';
 import { AssetStats, MarketInsight, FuturesPosition, FuturesOrder, FuturesTrade, FuturesTrades24h, HistoricalSnapshot, FuturesIncome } from './types';
 import { BinanceService } from './services/binanceService';
 import { AiProvider, AiChatMessage, getMarketInsights, sendAiChat } from './services/geminiService';
@@ -210,6 +210,107 @@ const ConstituentCandles = ({ points }: { points: ConstituentChartPoint[] }) => 
       })}
     </g>
   );
+};
+
+const nearestConstituentPoint = (points: ConstituentChartPoint[], t: number) => {
+  if (!points.length || !Number.isFinite(t)) return null;
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  const right = points[lo];
+  const left = points[lo - 1];
+  if (!left) return right;
+  return Math.abs(left.t - t) <= Math.abs(right.t - t) ? left : right;
+};
+
+const readAxisScale = (scale: ((value: number) => unknown) | undefined, value: number) => {
+  if (!scale || !Number.isFinite(value)) return NaN;
+  const out = scale(value);
+  const n = typeof out === 'number' ? out : Number(out);
+  return Number.isFinite(n) ? n : NaN;
+};
+
+const ConstituentPointer = ({ points, rangeId }: { points: ConstituentChartPoint[]; rangeId: string }) => {
+  const plot = usePlotArea();
+  const xScale = useXAxisScale();
+  const yScale = useYAxisScale();
+  const xInv = useXAxisInverseScale() as ((value: number) => unknown) | undefined;
+  const yInv = useYAxisInverseScale() as ((value: number) => unknown) | undefined;
+  const groupRef = useRef<SVGGElement | null>(null);
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const svg = groupRef.current ? groupRef.current.ownerSVGElement : null;
+    if (!svg) return undefined;
+    const move = (event: MouseEvent) => {
+      const box = svg.getBoundingClientRect();
+      setPos({ x: event.clientX - box.left, y: event.clientY - box.top });
+    };
+    const leave = () => setPos(null);
+    svg.addEventListener('mousemove', move);
+    svg.addEventListener('mouseleave', leave);
+    return () => {
+      svg.removeEventListener('mousemove', move);
+      svg.removeEventListener('mouseleave', leave);
+    };
+  }, [points, plot]);
+
+  const inside = pos && plot && pos.x >= plot.x && pos.x <= plot.x + plot.width && pos.y >= plot.y && pos.y <= plot.y + plot.height;
+  let body: ReactElement | null = null;
+  if (inside && pos && plot && xScale && yScale && xInv && yInv) {
+    const xAtLeft = readAxisScale(xInv, plot.x);
+    const xAtRight = readAxisScale(xInv, plot.x + plot.width);
+    const xPixel = Number.isFinite(xAtLeft) && Number.isFinite(xAtRight) ? pos.x : pos.x - plot.x;
+    const yAtTop = readAxisScale(yInv, plot.y);
+    const yAtBottom = readAxisScale(yInv, plot.y + plot.height);
+    const yPixel = Number.isFinite(yAtTop) && Number.isFinite(yAtBottom) ? pos.y : pos.y - plot.y;
+    const atTime = readAxisScale(xInv, xPixel);
+    const atPrice = readAxisScale(yInv, yPixel);
+    const point = nearestConstituentPoint(points, atTime);
+    if (point && Number.isFinite(atPrice)) {
+      const priceText = (value?: number) => {
+        const text = formatTickerPrice(value);
+        return text ? `$${text}` : '—';
+      };
+      const lines = point.open != null && point.high != null && point.low != null && point.close != null
+        ? [
+            formatConstituentTooltip(rangeId, point.t),
+            `시 ${priceText(point.open)}  종 ${priceText(point.close)}`,
+            `고 ${priceText(point.high)}  저 ${priceText(point.low)}`,
+            `포인터 ${priceText(atPrice)}`,
+          ]
+        : [
+            formatConstituentTooltip(rangeId, point.t),
+            `가격 ${priceText(point.price)}`,
+            `포인터 ${priceText(atPrice)}`,
+          ];
+      const boxW = 196;
+      const boxH = 8 + lines.length * 15;
+      let boxX = pos.x + 14;
+      let boxY = pos.y - boxH - 10;
+      if (boxX + boxW > plot.x + plot.width) boxX = pos.x - boxW - 14;
+      if (boxY < plot.y) boxY = pos.y + 14;
+      boxX = Math.max(plot.x, Math.min(boxX, plot.x + plot.width - boxW));
+      boxY = Math.max(plot.y, Math.min(boxY, plot.y + plot.height - boxH));
+      body = (
+        <g>
+          <line x1={pos.x} x2={pos.x} y1={plot.y} y2={plot.y + plot.height} stroke="rgba(255,255,255,0.45)" strokeDasharray="3 3" />
+          <line x1={plot.x} x2={plot.x + plot.width} y1={pos.y} y2={pos.y} stroke="rgba(255,255,255,0.45)" strokeDasharray="3 3" />
+          <rect x={boxX} y={boxY} width={boxW} height={boxH} rx={6} fill="#11151c" stroke="rgba(255,255,255,0.14)" />
+          {lines.map((line, index) => (
+            <text key={line + index} x={boxX + 8} y={boxY + 16 + index * 15} fill={index === 0 ? '#8b98ad' : '#ffffff'} fontSize={11} fontFamily="ui-monospace, monospace">
+              {line}
+            </text>
+          ))}
+        </g>
+      );
+    }
+  }
+  return <g ref={groupRef}>{body}</g>;
 };
 
 const ConstituentFillArrow = (props: {
@@ -3483,25 +3584,10 @@ export default function App() {
                                 width={72}
                                 tick={{ fill: '#8b98ad' }}
                               />
-                              <Tooltip
-                                contentStyle={{ backgroundColor: '#11151c', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', fontSize: '11px' }}
-                                labelFormatter={(value) => formatConstituentTooltip(constituentChartRange, Number(value))}
-                                formatter={(value: number | string, _name, item) => {
-                                  const point = item && item.payload ? item.payload as ConstituentChartPoint & { side?: string; qty?: number } : undefined;
-                                  if (point && point.open != null && point.high != null && point.low != null && point.close != null) {
-                                    return [`시 ${formatTickerPrice(point.open)}  고 ${formatTickerPrice(point.high)}  저 ${formatTickerPrice(point.low)}  종 ${formatTickerPrice(point.close)}`, '봉'];
-                                  }
-                                  const label = point && point.side ? (point.side === 'SHORT' ? '숏' : '롱') : constituentChartRangeById(constituentChartRange).kind === 'agg' ? '가격' : '종가';
-                                  return [formatTickerPrice(value) ? `$${formatTickerPrice(value)}` : '—', label];
-                                }}
-                              />
                               {constituentChartRangeById(constituentChartRange).kind === 'candle' ? (
-                                <Line type="monotone" dataKey="price" stroke="transparent" dot={false} activeDot={false} strokeWidth={0} isAnimationActive={false} />
+                                <ConstituentCandles points={constituentChart.points} />
                               ) : (
                                 <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
-                              )}
-                              {constituentChartRangeById(constituentChartRange).kind === 'candle' && (
-                                <ConstituentCandles points={constituentChart.points} />
                               )}
                               {constituentChart.fills.length > 0 && (
                                 <Scatter data={constituentChart.fills} dataKey="price" shape={ConstituentFillArrow} isAnimationActive={false} />
@@ -3536,6 +3622,7 @@ export default function App() {
                                   />
                                 );
                               })}
+                              <ConstituentPointer points={constituentChart.points} rangeId={constituentChartRange} />
                             </ComposedChart>
                           </ResponsiveContainer>
                         </div>
