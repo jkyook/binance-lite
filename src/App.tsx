@@ -395,6 +395,8 @@ export default function App() {
   const [accountInfo, setAccountInfo] = useState<any>(null);
   const [walletAssetsOpen, setWalletAssetsOpen] = useState(false);
   const walletChipRef = useRef<HTMLDivElement | null>(null);
+  const [positionExposureOpen, setPositionExposureOpen] = useState(false);
+  const positionChipRef = useRef<HTMLDivElement | null>(null);
   const [allWalletsOpen, setAllWalletsOpen] = useState(false);
   const allWalletsChipRef = useRef<HTMLDivElement | null>(null);
   const [allWalletsOverview, setAllWalletsOverview] = useState<{
@@ -801,6 +803,17 @@ export default function App() {
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [walletAssetsOpen]);
+
+  useEffect(() => {
+    if (!positionExposureOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!positionChipRef.current?.contains(e.target as Node)) {
+        setPositionExposureOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [positionExposureOpen]);
 
   useEffect(() => {
     if (!allWalletsOpen) return;
@@ -1957,7 +1970,30 @@ export default function App() {
 
   const totalUPNL = positions.reduce((acc, p) => acc + parseFloat(p.unRealizedProfit), 0);
   const totalExposure = positions.reduce((acc, p) => acc + (Math.abs(parseFloat(p.positionAmt)) * parseFloat(p.markPrice)), 0);
-  const netExposure = positions.reduce((acc, p) => acc + (parseFloat(p.positionAmt) * parseFloat(p.markPrice)), 0);
+  const positionExposureRows = positions
+    .map((p) => {
+      const amt = parseFloat(p.positionAmt) || 0;
+      const mark = parseFloat(p.markPrice) || 0;
+      const sideRaw = String((p as FuturesPosition & { positionSide?: string }).positionSide || '').toUpperCase();
+      let usd = amt * mark;
+      if (sideRaw === 'SHORT' && usd > 0) usd = -Math.abs(usd);
+      else if (sideRaw === 'LONG' && usd < 0) usd = Math.abs(usd);
+      const side: 'LONG' | 'SHORT' = usd >= 0 ? 'LONG' : 'SHORT';
+      return {
+        key: `${p.symbol}:${sideRaw || side}`,
+        symbol: p.symbol,
+        side,
+        qty: side === 'SHORT' && amt > 0 ? -amt : amt,
+        usd,
+      };
+    })
+    .filter((row) => Number.isFinite(row.usd) && Math.abs(row.usd) >= 0.5)
+    .sort((a, b) => Math.abs(b.usd) - Math.abs(a.usd));
+  const longExposureRows = positionExposureRows.filter((row) => row.side === 'LONG');
+  const shortExposureRows = positionExposureRows.filter((row) => row.side === 'SHORT');
+  const longExposure = longExposureRows.reduce((acc, row) => acc + row.usd, 0);
+  const shortExposure = shortExposureRows.reduce((acc, row) => acc + row.usd, 0);
+  const netExposure = longExposure + shortExposure;
   // Exposed = 포지션 노셔널 + 전체 지갑(USDT) + Jupiter 순자산(USD).
   // overview에 USD-M이 이미 포함되어 중복 없음. overview 없으면 USD-M wallet만 fallback.
   // Jupiter API 자산·대출만 시나리오 순자산에 넣는다. 별도 JLP는 포지션이라 순자산에서 제외.
@@ -3054,9 +3090,89 @@ export default function App() {
                 )}
               </div>
             </div>
-            <div className="kpi-chip">
+            <div
+              ref={positionChipRef}
+              className={`kpi-chip relative group cursor-pointer select-none ${positionExposureOpen ? 'border-accent/40' : ''}`}
+              onClick={() => setPositionExposureOpen((o) => !o)}
+              title={positionExposureOpen ? '클릭하면 닫기' : '클릭하면 롱·숏 내역'}
+            >
               <span className="metric-label">Position</span>
-              <KpiDualMoney usd={totalExposure} rate={usdKrwRate} />
+              <KpiDualMoney
+                usd={netExposure}
+                rate={usdKrwRate}
+                signed
+                valueClassName={netExposure > 0.5 ? 'text-ok' : netExposure < -0.5 ? 'text-danger' : 'text-white'}
+              />
+              <div
+                className={`absolute left-0 top-full z-[60] mt-1.5 w-[280px] rounded-xl border border-white/10 bg-ink-950/95 p-2.5 shadow-2xl shadow-black/50 backdrop-blur-md ${
+                  positionExposureOpen
+                    ? 'block pointer-events-auto'
+                    : 'hidden pointer-events-none group-hover:block'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-400">순노출</span>
+                  {positionExposureOpen && (
+                    <button
+                      type="button"
+                      className="text-[10px] text-ink-500 hover:text-white"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPositionExposureOpen(false);
+                      }}
+                    >
+                      닫기
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-0.5 text-[11px] font-mono">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-ok">롱</span>
+                    <span className="text-ok tabular-nums">${formatUsdCompact(longExposure)}</span>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-danger">숏</span>
+                    <span className="text-danger tabular-nums">${formatUsdCompact(Math.abs(shortExposure))}</span>
+                  </div>
+                  <div className="flex justify-between gap-2 border-t border-white/[0.06] pt-1">
+                    <span className="text-ink-400">순노출</span>
+                    <span className={`tabular-nums ${netExposure >= 0 ? 'text-ok' : 'text-danger'}`}>
+                      ${formatUsdCompact(netExposure)}
+                    </span>
+                  </div>
+                </div>
+                {positionExposureRows.length === 0 ? (
+                  <div className="text-[11px] text-ink-500 py-2">포지션 없음</div>
+                ) : (
+                  <div className="mt-2 max-h-[min(320px,50vh)] overflow-y-auto custom-scrollbar overscroll-contain space-y-2">
+                    {([
+                      ['롱', longExposureRows, 'text-ok'] as const,
+                      ['숏', shortExposureRows, 'text-danger'] as const,
+                    ]).filter(([, rows]) => rows.length > 0).map(([label, rows, tone]) => (
+                      <div key={label}>
+                        <div className={`mb-0.5 text-[9px] uppercase tracking-wider ${tone}`}>{label}</div>
+                        <ul className="space-y-1">
+                          {rows.map((row) => (
+                            <li
+                              key={row.key}
+                              className="grid grid-cols-[1fr_auto_auto] gap-x-2 items-center text-[11px] font-mono border-b border-white/[0.04] last:border-0 py-1"
+                            >
+                              <span className="text-ink-300 truncate">{row.symbol.replace(/USDT$/, '')}</span>
+                              <span className={`tabular-nums text-right ${tone}`}>
+                                {formatQty(row.qty)}
+                              </span>
+                              <span className={`tabular-nums text-right w-[72px] ${tone}`}>
+                                ${formatUsdCompact(Math.abs(row.usd))}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             <div
               ref={walletChipRef}
