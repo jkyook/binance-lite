@@ -667,28 +667,29 @@ export default function App() {
   const [tradeWindowPartial, setTradeWindowPartial] = useState(false);
   const [tradeWindowListOpen, setTradeWindowListOpen] = useState(false);
   const [tradeWindowHours, setTradeWindowHours] = useState<6 | 12>(12);
-  const seenTradeSymbolsRef = useRef(new Set<string>());
-  useEffect(() => {
-    for (const p of positions) {
-      if (p.symbol && Math.abs(parseFloat(String(p.positionAmt || '0'))) > 0) {
-        seenTradeSymbolsRef.current.add(p.symbol);
-      }
-    }
-  }, [positions]);
+  const tradeWindowAbortRef = useRef<AbortController | null>(null);
+  const tradeWindowReqRef = useRef(0);
 
   const loadTradeWindow = async (endMs: number, hours: 6 | 12) => {
+    tradeWindowAbortRef.current?.abort();
+    const controller = new AbortController();
+    tradeWindowAbortRef.current = controller;
+    const reqId = ++tradeWindowReqRef.current;
     setTradeWindowHours(hours);
+    setTradeWindowRows([]);
+    setTradeWindowRange(null);
+    setTradeWindowPartial(false);
+    setTradeWindowListOpen(false);
     setTradeWindowLoading(true);
     setTradeWindowError('');
     try {
-      const symbols: string[] = [];
-      seenTradeSymbolsRef.current.forEach((symbol) => {
-        symbols.push(symbol);
-      });
-      const data = await BinanceService.getFuturesTradesWindow(endMs, symbols, hours);
+      const symbols = positions
+        .filter((p) => p.symbol && Math.abs(parseFloat(String(p.positionAmt || '0'))) > 0)
+        .map((p) => p.symbol);
+      const data = await BinanceService.getFuturesTradesWindow(endMs, symbols, hours, controller.signal);
+      if (reqId !== tradeWindowReqRef.current) return;
       setTradeWindowRows(data.trades || []);
       setTradeWindowPartial(Boolean(data.partial));
-      setTradeWindowListOpen(false);
       setTradeWindowRange({
         start: data.startTime,
         end: data.endTime,
@@ -696,12 +697,13 @@ export default function App() {
         sellUsd: data.sellUsd,
       });
     } catch (err: unknown) {
+      if (controller.signal.aborted || reqId !== tradeWindowReqRef.current) return;
       const message = err instanceof Error ? err.message : '체결 조회 실패';
       setTradeWindowError(message);
       setTradeWindowRows([]);
       setTradeWindowPartial(false);
     } finally {
-      setTradeWindowLoading(false);
+      if (reqId === tradeWindowReqRef.current) setTradeWindowLoading(false);
     }
   };
 

@@ -332,7 +332,7 @@ export class BinanceService {
     return response.json();
   }
 
-  static async getFuturesTradesWindow(endTime: number, symbols: string[] = [], hours: 6 | 12 = 12): Promise<{
+  static async getFuturesTradesWindow(endTime: number, symbols: string[] = [], hours: 6 | 12 = 12, signal?: AbortSignal): Promise<{
     startTime: number;
     endTime: number;
     trades: FuturesTrade24hRow[];
@@ -350,7 +350,7 @@ export class BinanceService {
       .map((s) => s.trim().toUpperCase())
       .filter((s) => /^[A-Z0-9]{5,20}$/.test(s));
     if (clean.length) query.set("symbols", clean.join(","));
-    const response = await fetch(`/api/futures/trades-window?${query.toString()}`);
+    const response = await fetch(`/api/futures/trades-window?${query.toString()}`, { signal });
     if (!response.ok) {
       const errorText = await response.text();
       let errorMsg = "Failed to fetch trade window";

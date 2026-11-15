@@ -1299,13 +1299,12 @@ async function startServer() {
     time: number;
     realizedPnl: number;
   };
-  const tradesWindowInflight = new Map<string, Promise<any>>();
-
   async function collectTradesWindow(args: {
     startTime: number;
     endTime: number;
     hours: number;
     symbolsQuery: string;
+    isStopped?: () => boolean;
   }) {
     const started = Date.now();
     const { startTime, endTime, hours } = args;
@@ -1327,7 +1326,7 @@ async function startServer() {
     const loadSymbol = async (symbol: string) => {
       let cursorStart = startTime;
       let cursorEnd = endTime;
-      for (let page = 0; page < 40 && !stop; page++) {
+      for (let page = 0; page < 40 && !stop && !args.isStopped?.(); page++) {
         if (cursorEnd <= cursorStart) break;
         const raw = await binanceRequest("/fapi/v1/userTrades", "GET", {
           symbol,
@@ -1385,7 +1384,7 @@ async function startServer() {
       }
     };
     const pump = () => {
-      while (running < 5 && queue.length && !stop) {
+      while (running < 5 && queue.length && !stop && !args.isStopped?.()) {
         const symbol = queue.shift() as string;
         running += 1;
         loadSymbol(symbol)
@@ -1426,7 +1425,7 @@ async function startServer() {
     let windowStart = startTime;
     let windowEnd = endTime;
     try {
-      for (let page = 0; page < 20 && !stop; page++) {
+      for (let page = 0; page < 20 && !stop && !args.isStopped?.(); page++) {
         if (windowEnd <= windowStart) break;
         const rows = await binanceRequest("/fapi/v1/income", "GET", {
           incomeType: "COMMISSION",
@@ -1484,20 +1483,19 @@ async function startServer() {
       const requestedHours = Number(req.query.hours);
       const hours = requestedHours === 6 ? 6 : 12;
       const startTime = endTime - hours * 60 * 60 * 1000;
-      const cacheKey = `${hours}:${Math.floor(endTime / 60_000)}:${String(req.query.symbols || "")}`;
-      let pending = tradesWindowInflight.get(cacheKey);
-      if (!pending) {
-        pending = collectTradesWindow({
-          startTime,
-          endTime,
-          hours,
-          symbolsQuery: String(req.query.symbols || ""),
-        }).finally(() => {
-          tradesWindowInflight.delete(cacheKey);
-        });
-        tradesWindowInflight.set(cacheKey, pending);
-      }
-      res.json(await pending);
+      let stopped = false;
+      req.on("close", () => {
+        if (!res.writableEnded) stopped = true;
+      });
+      const data = await collectTradesWindow({
+        startTime,
+        endTime,
+        hours,
+        symbolsQuery: String(req.query.symbols || ""),
+        isStopped: () => stopped,
+      });
+      if (stopped || res.writableEnded) return;
+      res.json(data);
     } catch (err: any) {
       sendApiError(res, err);
     }
