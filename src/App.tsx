@@ -664,6 +664,8 @@ export default function App() {
   const [tradeWindowLoading, setTradeWindowLoading] = useState(false);
   const [tradeWindowError, setTradeWindowError] = useState('');
   const [tradeWindowRange, setTradeWindowRange] = useState<{ start: number; end: number; buyUsd: number; sellUsd: number } | null>(null);
+  const [tradeWindowPartial, setTradeWindowPartial] = useState(false);
+  const [tradeWindowSymbol, setTradeWindowSymbol] = useState<string | null>(null);
   const seenTradeSymbolsRef = useRef(new Set<string>());
   useEffect(() => {
     for (const p of positions) {
@@ -683,6 +685,8 @@ export default function App() {
       });
       const data = await BinanceService.getFuturesTradesWindow(endMs, symbols);
       setTradeWindowRows(data.trades || []);
+      setTradeWindowPartial(Boolean(data.partial));
+      setTradeWindowSymbol(null);
       setTradeWindowRange({
         start: data.startTime,
         end: data.endTime,
@@ -693,10 +697,28 @@ export default function App() {
       const message = err instanceof Error ? err.message : '체결 조회 실패';
       setTradeWindowError(message);
       setTradeWindowRows([]);
+      setTradeWindowPartial(false);
     } finally {
       setTradeWindowLoading(false);
     }
   };
+
+  const tradeWindowBySymbol = useMemo(() => {
+    const grouped = new Map<string, { symbol: string; buyUsd: number; sellUsd: number; realized: number; count: number }>();
+    for (const row of tradeWindowRows) {
+      const current = grouped.get(row.symbol) || { symbol: row.symbol, buyUsd: 0, sellUsd: 0, realized: 0, count: 0 };
+      if (row.side === 'BUY') current.buyUsd += row.quoteQty;
+      else current.sellUsd += row.quoteQty;
+      current.realized += row.realizedPnl;
+      current.count += 1;
+      grouped.set(row.symbol, current);
+    }
+    return Array.from(grouped.values()).sort((a, b) => (b.buyUsd + b.sellUsd) - (a.buyUsd + a.sellUsd));
+  }, [tradeWindowRows]);
+
+  const visibleTradeWindowRows = tradeWindowSymbol
+    ? tradeWindowRows.filter((row) => row.symbol === tradeWindowSymbol)
+    : tradeWindowRows;
   // 동시 fetch 방지 + stale 응답 차단용 id
   const historyFetchIdRef = useRef(0);
   const historyFetchPromiseRef = useRef<Promise<void> | null>(null);
@@ -3854,15 +3876,12 @@ export default function App() {
               <div className="flex gap-1.5">
                 <button
                   onClick={() => {
-                    const next = !tradeWindowOpen;
-                    setTradeWindowOpen(next);
-                    if (next) {
-                      const now = Date.now();
-                      setTradeWindowEnd(toDatetimeLocalValue(now));
-                      void loadTradeWindow(now);
-                    }
+                    const now = Date.now();
+                    setTradeWindowOpen(true);
+                    setTradeWindowEnd(toDatetimeLocalValue(now));
+                    void loadTradeWindow(now);
                   }}
-                  className={`seg-btn ${tradeWindowOpen ? 'seg-btn-on' : 'seg-btn-off'}`}
+                  className="seg-btn seg-btn-off"
                   title="기준 시각 이전 24시간 체결"
                 >
                   24h 체결
@@ -3924,91 +3943,7 @@ export default function App() {
               ))}
             </div>
 
-            {tradeWindowOpen && (
-              <div className="mb-3 space-y-2">
-                <p className="text-[10px] leading-relaxed text-ink-400">
-                  위 목록은 손익 원장입니다. 10분마다 다시 받고, 바이낸스 원장도 체결보다 몇 분 늦습니다.
-                  여기 목록은 선택한 시각부터 과거 24시간의 체결입니다.
-                </p>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="datetime-local"
-                    value={tradeWindowEnd}
-                    onChange={(e) => setTradeWindowEnd(e.target.value)}
-                    className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const endMs = new Date(tradeWindowEnd).getTime();
-                      if (!Number.isFinite(endMs)) return;
-                      void loadTradeWindow(endMs);
-                    }}
-                    disabled={tradeWindowLoading || !tradeWindowEnd}
-                    className="seg-btn seg-btn-on disabled:opacity-50"
-                  >
-                    조회
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const now = Date.now();
-                      setTradeWindowEnd(toDatetimeLocalValue(now));
-                      void loadTradeWindow(now);
-                    }}
-                    disabled={tradeWindowLoading}
-                    className="seg-btn seg-btn-off disabled:opacity-50"
-                  >
-                    지금
-                  </button>
-                </div>
-                {tradeWindowRange && (
-                  <div className="text-[10px] text-ink-400 font-mono">
-                    {new Date(tradeWindowRange.start).toLocaleString()} – {new Date(tradeWindowRange.end).toLocaleString()}
-                    {' · '}매수 ${formatUsdCompact(tradeWindowRange.buyUsd)} / 매도 ${formatUsdCompact(tradeWindowRange.sellUsd)}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {tradeWindowOpen ? (
-              <div className="flex-1 overflow-y-auto space-y-0.5 custom-scrollbar max-h-[280px] pr-1">
-                {tradeWindowLoading && tradeWindowRows.length === 0 && (
-                  <div className="py-10 text-center text-ink-400 text-sm">24시간 체결 불러오는 중…</div>
-                )}
-                {tradeWindowError && (
-                  <div className="py-6 text-center text-sm text-warn">{tradeWindowError}</div>
-                )}
-                {!tradeWindowLoading && !tradeWindowError && tradeWindowRows.length === 0 && (
-                  <div className="py-8 text-center text-sm text-ink-400/70 italic">이 24시간에 체결이 없습니다</div>
-                )}
-                {tradeWindowRows.slice(0, expandedIncome ? tradeWindowRows.length : 20).map((row) => (
-                  <div key={`${row.symbol}-${row.id}`} className="text-sm flex justify-between items-center py-2.5 border-b border-white/[0.04] font-mono px-1 rounded">
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-white font-semibold truncate">
-                        {row.symbol.replace(/USDT$/, '')}
-                        <span className={row.side === 'BUY' ? 'text-ok ml-1.5' : 'text-danger ml-1.5'}>{row.side === 'BUY' ? '매수' : '매도'}</span>
-                      </span>
-                      <span className="text-ink-400 text-[10px]">
-                        {formatQty(row.qty)} @ {formatTickerPrice(row.price) || row.price}
-                        {row.realizedPnl ? ` · 실현 ${formatIncomeAmount(row.realizedPnl)}` : ''}
-                      </span>
-                    </div>
-                    <div className="text-right flex flex-col shrink-0">
-                      <span className="text-white">${formatUsdCompact(row.quoteQty)}</span>
-                      <span className="text-ink-400 text-[10px]">
-                        {new Date(row.time).toLocaleDateString()} {new Date(row.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-                {tradeWindowRows.length > 20 && (
-                  <button onClick={() => setExpandedIncome(!expandedIncome)} className="mt-2 text-[11px] text-accent self-end hover:underline">
-                    {expandedIncome ? '접기' : `더보기 (${tradeWindowRows.length})`}
-                  </button>
-                )}
-              </div>
-            ) : showCoinDetails ? (
+            {showCoinDetails ? (
               <div className="flex-1 overflow-y-auto space-y-4 custom-scrollbar max-h-[280px] pr-1">
                 {Object.keys(aggregatedIncome.pnl).length > 0 && (
                   <div>
@@ -4074,7 +4009,7 @@ export default function App() {
               </div>
             )}
 
-            {!tradeWindowOpen && sevenDayIncome.length > 10 && (
+            {sevenDayIncome.length > 10 && (
               <button onClick={() => setExpandedIncome(!expandedIncome)} className="mt-2 text-[11px] text-accent self-end hover:underline">
                 {expandedIncome ? '접기' : '더보기'}
               </button>
@@ -4094,6 +4029,134 @@ export default function App() {
                 <span className={`font-semibold ${aggregatedIncome.netIncome >= 0 ? 'text-ok' : 'text-danger'}`}>{formatIncomeAmount(aggregatedIncome.netIncome)}</span>
               </div>
             </div>
+            {tradeWindowOpen && createPortal(
+              <div
+                className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-ink-950/80 backdrop-blur-sm"
+                onClick={() => setTradeWindowOpen(false)}
+              >
+                <div
+                  className="panel flex w-full max-w-3xl max-h-[88vh] flex-col overflow-hidden p-4 shadow-2xl"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <div>
+                      <div className="text-sm font-semibold text-white">24시간 체결</div>
+                      <div className="text-[10px] text-ink-400">기준 시각부터 과거 24시간의 체결 전체</div>
+                    </div>
+                    <button type="button" className="text-ink-400 hover:text-white" onClick={() => setTradeWindowOpen(false)} aria-label="닫기">
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <input
+                      type="datetime-local"
+                      value={tradeWindowEnd}
+                      onChange={(e) => setTradeWindowEnd(e.target.value)}
+                      className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const endMs = new Date(tradeWindowEnd).getTime();
+                        if (!Number.isFinite(endMs)) return;
+                        void loadTradeWindow(endMs);
+                      }}
+                      disabled={tradeWindowLoading || !tradeWindowEnd}
+                      className="seg-btn seg-btn-on disabled:opacity-50"
+                    >
+                      조회
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const now = Date.now();
+                        setTradeWindowEnd(toDatetimeLocalValue(now));
+                        void loadTradeWindow(now);
+                      }}
+                      disabled={tradeWindowLoading}
+                      className="seg-btn seg-btn-off disabled:opacity-50"
+                    >
+                      지금
+                    </button>
+                  </div>
+                  {tradeWindowRange && (
+                    <div className="mb-3 text-[11px] text-ink-300 font-mono">
+                      {new Date(tradeWindowRange.start).toLocaleString()} – {new Date(tradeWindowRange.end).toLocaleString()}
+                      <span className="text-ink-400"> · {tradeWindowRows.length.toLocaleString()}건 · 매수 ${formatUsdCompact(tradeWindowRange.buyUsd)} · 매도 ${formatUsdCompact(tradeWindowRange.sellUsd)}</span>
+                    </div>
+                  )}
+                  {tradeWindowPartial && (
+                    <div className="mb-2 text-[11px] text-warn">일부 종목은 조회 한도에 걸려 24시간이 다 담기지 않았을 수 있습니다.</div>
+                  )}
+                  <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-4">
+                    {tradeWindowLoading && tradeWindowRows.length === 0 && (
+                      <div className="py-10 text-center text-ink-400 text-sm">24시간 체결을 모두 모으는 중…</div>
+                    )}
+                    {tradeWindowError && (
+                      <div className="py-4 text-center text-sm text-warn">{tradeWindowError}</div>
+                    )}
+                    {!tradeWindowLoading && !tradeWindowError && tradeWindowRows.length === 0 && (
+                      <div className="py-8 text-center text-sm text-ink-400/70 italic">이 24시간에 체결이 없습니다</div>
+                    )}
+                    {tradeWindowBySymbol.length > 0 && (
+                      <div>
+                        <div className="mb-2 text-[10px] font-semibold text-accent">코인별 금액</div>
+                        <div className="space-y-1">
+                          {tradeWindowBySymbol.map((row) => (
+                            <button
+                              key={row.symbol}
+                              type="button"
+                              onClick={() => setTradeWindowSymbol((current) => current === row.symbol ? null : row.symbol)}
+                              className={`w-full text-left rounded px-2 py-1.5 font-mono text-[12px] border ${tradeWindowSymbol === row.symbol ? 'border-accent/50 bg-white/[0.04]' : 'border-white/[0.04]'}`}
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="text-white font-semibold">{row.symbol.replace(/USDT$/, '')}</span>
+                                <span className="text-white">${formatUsdCompact(row.buyUsd + row.sellUsd)}</span>
+                              </div>
+                              <div className="mt-0.5 flex justify-between gap-3 text-[10px] text-ink-400">
+                                <span>매수 ${formatUsdCompact(row.buyUsd)} · 매도 ${formatUsdCompact(row.sellUsd)} · {row.count.toLocaleString()}건</span>
+                                <span className={row.realized >= 0 ? 'text-ok' : 'text-danger'}>실현 {formatIncomeAmount(row.realized)}</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {visibleTradeWindowRows.length > 0 && (
+                      <div>
+                        <div className="mb-2 flex items-center justify-between text-[10px] font-semibold text-white">
+                          <span>{tradeWindowSymbol ? `${tradeWindowSymbol.replace(/USDT$/, '')} 체결` : '전체 체결'}</span>
+                          <span className="text-ink-400 font-normal">{visibleTradeWindowRows.length.toLocaleString()}건</span>
+                        </div>
+                        <div className="space-y-0.5">
+                          {visibleTradeWindowRows.map((row) => (
+                            <div key={`${row.symbol}-${row.id}`} className="text-sm flex justify-between items-center py-2 border-b border-white/[0.04] font-mono px-1">
+                              <div className="flex flex-col min-w-0">
+                                <span className="text-white font-semibold truncate">
+                                  {row.symbol.replace(/USDT$/, '')}
+                                  <span className={row.side === 'BUY' ? 'text-ok ml-1.5' : 'text-danger ml-1.5'}>{row.side === 'BUY' ? '매수' : '매도'}</span>
+                                </span>
+                                <span className="text-ink-400 text-[10px]">
+                                  {formatQty(row.qty)} @ {formatTickerPrice(row.price) || row.price}
+                                  {row.realizedPnl ? ` · 실현 ${formatIncomeAmount(row.realizedPnl)}` : ''}
+                                </span>
+                              </div>
+                              <div className="text-right flex flex-col shrink-0">
+                                <span className="text-white">${formatUsdCompact(row.quoteQty)}</span>
+                                <span className="text-ink-400 text-[10px]">
+                                  {new Date(row.time).toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>,
+              document.body,
+            )}
           </section>
 
           {/* Open Orders */}

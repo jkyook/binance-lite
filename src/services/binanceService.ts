@@ -340,13 +340,13 @@ export class BinanceService {
     buyUsd: number;
     sellUsd: number;
     symbols: string[];
+    partial?: boolean;
   }> {
     const query = new URLSearchParams();
     query.set("endTime", String(Math.round(endTime)));
     const clean = symbols
       .map((s) => s.trim().toUpperCase())
-      .filter((s) => /^[A-Z0-9]{5,20}$/.test(s))
-      .slice(0, 24);
+      .filter((s) => /^[A-Z0-9]{5,20}$/.test(s));
     if (clean.length) query.set("symbols", clean.join(","));
     const response = await fetch(`/api/futures/trades-window?${query.toString()}`);
     if (!response.ok) {
