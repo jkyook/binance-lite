@@ -332,7 +332,7 @@ export class BinanceService {
     return response.json();
   }
 
-  static async getFuturesTradesWindow(endTime: number, symbols: string[] = []): Promise<{
+  static async getFuturesTradesWindow(endTime: number, symbols: string[] = [], hours: 6 | 12 = 12): Promise<{
     startTime: number;
     endTime: number;
     trades: FuturesTrade24hRow[];
@@ -341,9 +341,11 @@ export class BinanceService {
     sellUsd: number;
     symbols: string[];
     partial?: boolean;
+    hours?: number;
   }> {
     const query = new URLSearchParams();
     query.set("endTime", String(Math.round(endTime)));
+    query.set("hours", String(hours));
     const clean = symbols
       .map((s) => s.trim().toUpperCase())
       .filter((s) => /^[A-Z0-9]{5,20}$/.test(s));

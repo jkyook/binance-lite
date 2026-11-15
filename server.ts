@@ -1294,7 +1294,9 @@ async function startServer() {
       let endTime = Number(req.query.endTime);
       if (!Number.isFinite(endTime) || endTime <= 0) endTime = now;
       if (endTime > now + 60_000) endTime = now;
-      const startTime = endTime - 12 * 60 * 60 * 1000;
+      const requestedHours = Number(req.query.hours);
+      const hours = requestedHours === 6 ? 6 : 12;
+      const startTime = endTime - hours * 60 * 60 * 1000;
       const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       const symbols = new Set<string>();
       let partial = false;
@@ -1439,6 +1441,7 @@ async function startServer() {
         sellUsd,
         symbols: symbolList,
         partial,
+        hours,
       });
     } catch (err: any) {
       sendApiError(res, err);

@@ -666,6 +666,7 @@ export default function App() {
   const [tradeWindowRange, setTradeWindowRange] = useState<{ start: number; end: number; buyUsd: number; sellUsd: number } | null>(null);
   const [tradeWindowPartial, setTradeWindowPartial] = useState(false);
   const [tradeWindowListOpen, setTradeWindowListOpen] = useState(false);
+  const [tradeWindowHours, setTradeWindowHours] = useState<6 | 12>(12);
   const seenTradeSymbolsRef = useRef(new Set<string>());
   useEffect(() => {
     for (const p of positions) {
@@ -675,7 +676,8 @@ export default function App() {
     }
   }, [positions]);
 
-  const loadTradeWindow = async (endMs: number) => {
+  const loadTradeWindow = async (endMs: number, hours: 6 | 12) => {
+    setTradeWindowHours(hours);
     setTradeWindowLoading(true);
     setTradeWindowError('');
     try {
@@ -683,7 +685,7 @@ export default function App() {
       seenTradeSymbolsRef.current.forEach((symbol) => {
         symbols.push(symbol);
       });
-      const data = await BinanceService.getFuturesTradesWindow(endMs, symbols);
+      const data = await BinanceService.getFuturesTradesWindow(endMs, symbols, hours);
       setTradeWindowRows(data.trades || []);
       setTradeWindowPartial(Boolean(data.partial));
       setTradeWindowListOpen(false);
@@ -3877,12 +3879,24 @@ export default function App() {
                     const now = Date.now();
                     setTradeWindowOpen(true);
                     setTradeWindowEnd(toDatetimeLocalValue(now));
-                    void loadTradeWindow(now);
+                    void loadTradeWindow(now, 12);
                   }}
-                  className="seg-btn seg-btn-off"
+                  className={`seg-btn ${tradeWindowOpen && tradeWindowHours === 12 ? 'seg-btn-on' : 'seg-btn-off'}`}
                   title="기준 시각 이전 12시간 체결"
                 >
                   12h 체결
+                </button>
+                <button
+                  onClick={() => {
+                    const now = Date.now();
+                    setTradeWindowOpen(true);
+                    setTradeWindowEnd(toDatetimeLocalValue(now));
+                    void loadTradeWindow(now, 6);
+                  }}
+                  className={`seg-btn ${tradeWindowOpen && tradeWindowHours === 6 ? 'seg-btn-on' : 'seg-btn-off'}`}
+                  title="기준 시각 이전 6시간 체결"
+                >
+                  6h 체결
                 </button>
                 <button
                   onClick={() => setShowCoinDetails(!showCoinDetails)}
@@ -4038,8 +4052,8 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between gap-2 mb-3">
                     <div>
-                      <div className="text-sm font-semibold text-white">12시간 체결</div>
-                      <div className="text-[10px] text-ink-400">기준 시각부터 과거 12시간의 체결</div>
+                      <div className="text-sm font-semibold text-white">{tradeWindowHours}시간 체결</div>
+                      <div className="text-[10px] text-ink-400">기준 시각부터 과거 {tradeWindowHours}시간의 체결</div>
                     </div>
                     <button type="button" className="text-ink-400 hover:text-white" onClick={() => setTradeWindowOpen(false)} aria-label="닫기">
                       <X size={16} />
@@ -4057,7 +4071,7 @@ export default function App() {
                       onClick={() => {
                         const endMs = new Date(tradeWindowEnd).getTime();
                         if (!Number.isFinite(endMs)) return;
-                        void loadTradeWindow(endMs);
+                        void loadTradeWindow(endMs, tradeWindowHours);
                       }}
                       disabled={tradeWindowLoading || !tradeWindowEnd}
                       className="seg-btn seg-btn-on disabled:opacity-50"
@@ -4067,9 +4081,9 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        const now = Date.now();
-                        setTradeWindowEnd(toDatetimeLocalValue(now));
-                        void loadTradeWindow(now);
+                      const now = Date.now();
+                      setTradeWindowEnd(toDatetimeLocalValue(now));
+                      void loadTradeWindow(now, tradeWindowHours);
                       }}
                       disabled={tradeWindowLoading}
                       className="seg-btn seg-btn-off disabled:opacity-50"
@@ -4084,17 +4098,17 @@ export default function App() {
                     </div>
                   )}
                   {tradeWindowPartial && (
-                    <div className="mb-2 text-[11px] text-warn">일부 종목은 조회 한도에 걸려 12시간이 다 담기지 않았을 수 있습니다.</div>
+                    <div className="mb-2 text-[11px] text-warn">일부 종목은 조회 한도에 걸려 {tradeWindowHours}시간이 다 담기지 않았을 수 있습니다.</div>
                   )}
                   <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-4">
                     {tradeWindowLoading && tradeWindowRows.length === 0 && (
-                      <div className="py-10 text-center text-ink-400 text-sm">12시간 체결을 모두 모으는 중…</div>
+                      <div className="py-10 text-center text-ink-400 text-sm">{tradeWindowHours}시간 체결을 모두 모으는 중…</div>
                     )}
                     {tradeWindowError && (
                       <div className="py-4 text-center text-sm text-warn">{tradeWindowError}</div>
                     )}
                     {!tradeWindowLoading && !tradeWindowError && tradeWindowRows.length === 0 && (
-                      <div className="py-8 text-center text-sm text-ink-400/70 italic">이 12시간에 체결이 없습니다</div>
+                      <div className="py-8 text-center text-sm text-ink-400/70 italic">이 {tradeWindowHours}시간에 체결이 없습니다</div>
                     )}
                     {tradeWindowBySymbol.length > 0 && (
                       <div>
