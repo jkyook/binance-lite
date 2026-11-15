@@ -1288,6 +1288,193 @@ async function startServer() {
     };
   }
 
+  type WindowTrade = {
+    symbol: string;
+    id: number;
+    orderId: number;
+    side: "BUY" | "SELL";
+    price: number;
+    qty: number;
+    quoteQty: number;
+    time: number;
+    realizedPnl: number;
+  };
+  const tradesWindowInflight = new Map<string, Promise<any>>();
+
+  async function collectTradesWindow(args: {
+    startTime: number;
+    endTime: number;
+    hours: number;
+    symbolsQuery: string;
+  }) {
+    const started = Date.now();
+    const { startTime, endTime, hours } = args;
+    const queue: string[] = [];
+    const queued = new Set<string>();
+    const trades: WindowTrade[] = [];
+    const seen = new Set<string>();
+    let partial = false;
+    let stop = false;
+    let incomeDone = false;
+    let running = 0;
+    let resolveDone = () => {};
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const noteDone = () => {
+      if (incomeDone && running === 0 && queue.length === 0) resolveDone();
+    };
+    const loadSymbol = async (symbol: string) => {
+      let cursorStart = startTime;
+      let cursorEnd = endTime;
+      for (let page = 0; page < 40 && !stop; page++) {
+        if (cursorEnd <= cursorStart) break;
+        const raw = await binanceRequest("/fapi/v1/userTrades", "GET", {
+          symbol,
+          startTime: String(cursorStart),
+          endTime: String(cursorEnd),
+          limit: "1000",
+        });
+        const list = Array.isArray(raw) ? raw : [];
+        let added = 0;
+        for (const t of list) {
+          const time = Number(t.time) || 0;
+          if (time < startTime || time > endTime) continue;
+          const id = Number(t.id) || 0;
+          const key = `${symbol}:${id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          added += 1;
+          const price = parseFloat(t.price || "0") || 0;
+          const qty = parseFloat(t.qty || "0") || 0;
+          trades.push({
+            symbol: String(t.symbol || symbol),
+            id,
+            orderId: Number(t.orderId) || 0,
+            side: String(t.side || "").toUpperCase() === "SELL" ? "SELL" : "BUY",
+            price,
+            qty,
+            quoteQty: parseFloat(t.quoteQty || "") || price * qty,
+            time,
+            realizedPnl: parseFloat(t.realizedPnl || "0") || 0,
+          });
+        }
+        if (list.length < 1000) break;
+        const times = list.map((t: any) => Number(t.time) || 0).filter((n: number) => n > 0);
+        if (!times.length || added === 0) {
+          partial = true;
+          break;
+        }
+        const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
+        if (newestFirst) {
+          const nextEnd = Math.min(...times) - 1;
+          if (nextEnd >= cursorEnd) {
+            partial = true;
+            break;
+          }
+          cursorEnd = nextEnd;
+        } else {
+          const nextStart = Math.max(...times) + 1;
+          if (nextStart <= cursorStart) {
+            partial = true;
+            break;
+          }
+          cursorStart = nextStart;
+        }
+        if (page === 39) partial = true;
+      }
+    };
+    const pump = () => {
+      while (running < 5 && queue.length && !stop) {
+        const symbol = queue.shift() as string;
+        running += 1;
+        loadSymbol(symbol)
+          .catch((e: any) => {
+            partial = true;
+            console.warn(`[trades-window] ${symbol} failed:`, e?.message || e);
+            if (e?.status === 429 && !e?.selfThrottled) stop = true;
+          })
+          .finally(() => {
+            running -= 1;
+            if (stop) queue.length = 0;
+            pump();
+            noteDone();
+          });
+      }
+      noteDone();
+    };
+    const enqueue = (symbol: string) => {
+      const name = String(symbol || "").trim().toUpperCase();
+      if (!/^[A-Z0-9]{5,20}$/.test(name) || queued.has(name) || stop) return;
+      queued.add(name);
+      queue.push(name);
+      pump();
+    };
+
+    for (const s of args.symbolsQuery.split(",")) enqueue(s);
+    const positionsPromise = binanceRequest("/fapi/v2/positionRisk")
+      .then((positions) => {
+        if (!Array.isArray(positions)) return;
+        for (const p of positions) {
+          if (Math.abs(parseFloat(p?.positionAmt || "0")) > 0 && p?.symbol) enqueue(String(p.symbol));
+        }
+      })
+      .catch((e: any) => {
+        console.warn("[trades-window] positions failed:", e?.message || e);
+      });
+
+    let windowStart = startTime;
+    let windowEnd = endTime;
+    try {
+      for (let page = 0; page < 20 && !stop; page++) {
+        if (windowEnd <= windowStart) break;
+        const rows = await binanceRequest("/fapi/v1/income", "GET", {
+          incomeType: "COMMISSION",
+          startTime: String(windowStart),
+          endTime: String(windowEnd),
+          limit: "1000",
+        });
+        const list = Array.isArray(rows) ? rows : [];
+        for (const row of list) {
+          if (row?.symbol) enqueue(String(row.symbol));
+        }
+        if (list.length < 1000) break;
+        const times = list.map((r: any) => Number(r.time) || 0).filter((n: number) => n > 0);
+        if (!times.length) break;
+        const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
+        if (newestFirst) windowEnd = Math.min(...times) - 1;
+        else windowStart = Math.max(...times) + 1;
+        if (page === 19) partial = true;
+      }
+    } catch (e: any) {
+      partial = true;
+      console.warn("[trades-window] income COMMISSION failed:", e?.message || e);
+    }
+    await positionsPromise;
+    incomeDone = true;
+    pump();
+    await done;
+
+    trades.sort((a, b) => b.time - a.time);
+    const buyUsd = trades.filter((t) => t.side === "BUY").reduce((s, t) => s + t.quoteQty, 0);
+    const sellUsd = trades.filter((t) => t.side === "SELL").reduce((s, t) => s + t.quoteQty, 0);
+    const symbols = Array.from(queued);
+    console.log(
+      `[trades-window] ${hours}h symbols=${symbols.length} trades=${trades.length} ${Date.now() - started}ms partial=${partial}`
+    );
+    return {
+      startTime,
+      endTime,
+      trades,
+      count: trades.length,
+      buyUsd,
+      sellUsd,
+      symbols,
+      partial,
+      hours,
+    };
+  }
+
   apiRouter.get("/futures/trades-window", async (req, res) => {
     try {
       const now = Date.now();
@@ -1297,152 +1484,20 @@ async function startServer() {
       const requestedHours = Number(req.query.hours);
       const hours = requestedHours === 6 ? 6 : 12;
       const startTime = endTime - hours * 60 * 60 * 1000;
-      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-      const symbols = new Set<string>();
-      let partial = false;
-      const extra = String(req.query.symbols || "")
-        .split(",")
-        .map((s) => s.trim().toUpperCase())
-        .filter((s) => /^[A-Z0-9]{5,20}$/.test(s));
-      for (const s of extra) symbols.add(s);
-      try {
-        const positions = await binanceRequest("/fapi/v2/positionRisk");
-        if (Array.isArray(positions)) {
-          for (const p of positions) {
-            if (Math.abs(parseFloat(p?.positionAmt || "0")) > 0 && p?.symbol) {
-              symbols.add(String(p.symbol).toUpperCase());
-            }
-          }
-        }
-      } catch (e: any) {
-        console.warn("[trades-window] positions failed:", e?.message || e);
+      const cacheKey = `${hours}:${Math.floor(endTime / 60_000)}:${String(req.query.symbols || "")}`;
+      let pending = tradesWindowInflight.get(cacheKey);
+      if (!pending) {
+        pending = collectTradesWindow({
+          startTime,
+          endTime,
+          hours,
+          symbolsQuery: String(req.query.symbols || ""),
+        }).finally(() => {
+          tradesWindowInflight.delete(cacheKey);
+        });
+        tradesWindowInflight.set(cacheKey, pending);
       }
-      for (const incomeType of ["REALIZED_PNL", "COMMISSION"]) {
-        let windowStart = startTime;
-        let windowEnd = endTime;
-        try {
-          for (let page = 0; page < 30; page++) {
-            if (windowEnd <= windowStart) break;
-            const rows = await binanceRequest("/fapi/v1/income", "GET", {
-              incomeType,
-              startTime: String(windowStart),
-              endTime: String(windowEnd),
-              limit: "1000",
-            });
-            const list = Array.isArray(rows) ? rows : [];
-            for (const row of list) {
-              if (row?.symbol) symbols.add(String(row.symbol).toUpperCase());
-            }
-            if (list.length < 1000) break;
-            const times = list.map((r: any) => Number(r.time) || 0).filter((n: number) => n > 0);
-            if (!times.length) break;
-            const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
-            if (newestFirst) windowEnd = Math.min(...times) - 1;
-            else windowStart = Math.max(...times) + 1;
-            if (page === 29) partial = true;
-            await sleep(80);
-          }
-        } catch (e: any) {
-          partial = true;
-          console.warn(`[trades-window] income ${incomeType} failed:`, e?.message || e);
-        }
-      }
-      const symbolList = Array.from(symbols);
-      const trades: Array<{
-        symbol: string;
-        id: number;
-        orderId: number;
-        side: "BUY" | "SELL";
-        price: number;
-        qty: number;
-        quoteQty: number;
-        time: number;
-        realizedPnl: number;
-      }> = [];
-      const seen = new Set<string>();
-      for (let i = 0; i < symbolList.length; i++) {
-        const symbol = symbolList[i];
-        let cursorStart = startTime;
-        let cursorEnd = endTime;
-        try {
-          for (let page = 0; page < 40; page++) {
-            if (cursorEnd <= cursorStart) break;
-            const raw = await binanceRequest("/fapi/v1/userTrades", "GET", {
-              symbol,
-              startTime: String(cursorStart),
-              endTime: String(cursorEnd),
-              limit: "1000",
-            });
-            const list = Array.isArray(raw) ? raw : [];
-            let added = 0;
-            for (const t of list) {
-              const time = Number(t.time) || 0;
-              if (time < startTime || time > endTime) continue;
-              const id = Number(t.id) || 0;
-              const key = `${symbol}:${id}`;
-              if (seen.has(key)) continue;
-              seen.add(key);
-              added += 1;
-              const price = parseFloat(t.price || "0") || 0;
-              const qty = parseFloat(t.qty || "0") || 0;
-              trades.push({
-                symbol: String(t.symbol || symbol),
-                id,
-                orderId: Number(t.orderId) || 0,
-                side: String(t.side || "").toUpperCase() === "SELL" ? "SELL" : "BUY",
-                price,
-                qty,
-                quoteQty: parseFloat(t.quoteQty || "") || price * qty,
-                time,
-                realizedPnl: parseFloat(t.realizedPnl || "0") || 0,
-              });
-            }
-            if (list.length < 1000) break;
-            const times = list.map((t: any) => Number(t.time) || 0).filter((n: number) => n > 0);
-            if (!times.length || added === 0) {
-              partial = true;
-              break;
-            }
-            const newestFirst = (Number(list[0]?.time) || 0) >= (Number(list[list.length - 1]?.time) || 0);
-            if (newestFirst) {
-              const nextEnd = Math.min(...times) - 1;
-              if (nextEnd >= cursorEnd) {
-                partial = true;
-                break;
-              }
-              cursorEnd = nextEnd;
-            } else {
-              const nextStart = Math.max(...times) + 1;
-              if (nextStart <= cursorStart) {
-                partial = true;
-                break;
-              }
-              cursorStart = nextStart;
-            }
-            if (page === 39) partial = true;
-            await sleep(80);
-          }
-        } catch (e: any) {
-          partial = true;
-          console.warn(`[trades-window] ${symbol} failed:`, e?.message || e);
-          if (e?.status === 429 && !e?.selfThrottled) break;
-        }
-        if (i < symbolList.length - 1) await sleep(120);
-      }
-      trades.sort((a, b) => b.time - a.time);
-      const buyUsd = trades.filter((t) => t.side === "BUY").reduce((s, t) => s + t.quoteQty, 0);
-      const sellUsd = trades.filter((t) => t.side === "SELL").reduce((s, t) => s + t.quoteQty, 0);
-      res.json({
-        startTime,
-        endTime,
-        trades,
-        count: trades.length,
-        buyUsd,
-        sellUsd,
-        symbols: symbolList,
-        partial,
-        hours,
-      });
+      res.json(await pending);
     } catch (err: any) {
       sendApiError(res, err);
     }
