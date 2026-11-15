@@ -1294,7 +1294,7 @@ async function startServer() {
       let endTime = Number(req.query.endTime);
       if (!Number.isFinite(endTime) || endTime <= 0) endTime = now;
       if (endTime > now + 60_000) endTime = now;
-      const startTime = endTime - 24 * 60 * 60 * 1000;
+      const startTime = endTime - 12 * 60 * 60 * 1000;
       const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       const symbols = new Set<string>();
       let partial = false;
