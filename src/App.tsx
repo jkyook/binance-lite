@@ -3863,8 +3863,8 @@ export default function App() {
 
           {/* Merged Activity: Income + Realized History */}
           <section className="col-span-12 md:col-span-6 xl:col-span-4 panel p-5 flex flex-col min-h-[420px]">
-            <div className="flex items-center justify-between gap-2 mb-3">
-              <div className="flex items-center gap-2 text-accent">
+            <div className="flex items-center justify-between gap-2 mb-3 flex-nowrap">
+              <div className="flex min-w-0 items-center gap-2 text-accent">
                 <DollarSign size={15} />
                 <span className="text-sm font-semibold text-white">
                   {historyRangeLabel(historyDays)} Activity
@@ -3873,7 +3873,7 @@ export default function App() {
                   ({sevenDayIncome.length}{incomeListFilter !== 'ALL' ? `/${rangedIncome.length}` : ''})
                 </span>
               </div>
-              <div className="flex gap-1.5">
+              <div className="flex shrink-0 gap-1.5">
                 <button
                   onClick={() => {
                     const now = Date.now();
@@ -3881,10 +3881,10 @@ export default function App() {
                     setTradeWindowEnd(toDatetimeLocalValue(now));
                     void loadTradeWindow(now, 12);
                   }}
-                  className={`seg-btn ${tradeWindowOpen && tradeWindowHours === 12 ? 'seg-btn-on' : 'seg-btn-off'}`}
+                  className={`seg-btn whitespace-nowrap ${tradeWindowOpen && tradeWindowHours === 12 ? 'seg-btn-on' : 'seg-btn-off'}`}
                   title="기준 시각 이전 12시간 체결"
                 >
-                  12h 체결
+                  12h
                 </button>
                 <button
                   onClick={() => {
@@ -3893,10 +3893,10 @@ export default function App() {
                     setTradeWindowEnd(toDatetimeLocalValue(now));
                     void loadTradeWindow(now, 6);
                   }}
-                  className={`seg-btn ${tradeWindowOpen && tradeWindowHours === 6 ? 'seg-btn-on' : 'seg-btn-off'}`}
+                  className={`seg-btn whitespace-nowrap ${tradeWindowOpen && tradeWindowHours === 6 ? 'seg-btn-on' : 'seg-btn-off'}`}
                   title="기준 시각 이전 6시간 체결"
                 >
-                  6h 체결
+                  6h
                 </button>
                 <button
                   onClick={() => setShowCoinDetails(!showCoinDetails)}
