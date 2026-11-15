@@ -1,4 +1,4 @@
-import { AssetStats, FuturesPosition, FuturesOrder, FuturesTrade, FuturesIncome, FuturesTrades24h } from '../types';
+import { AssetStats, FuturesPosition, FuturesOrder, FuturesTrade, FuturesIncome, FuturesTrades24h, FuturesTrade24hRow } from '../types';
 
 export class BinanceService {
   /**
@@ -321,6 +321,37 @@ export class BinanceService {
     if (!response.ok) {
       const errorText = await response.text();
       let errorMsg = 'Failed to fetch trades';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMsg = errorJson.error || errorJson.msg || errorMsg;
+      } catch (e) {
+        errorMsg = errorText || errorMsg;
+      }
+      throw new Error(errorMsg);
+    }
+    return response.json();
+  }
+
+  static async getFuturesTradesWindow(endTime: number, symbols: string[] = []): Promise<{
+    startTime: number;
+    endTime: number;
+    trades: FuturesTrade24hRow[];
+    count: number;
+    buyUsd: number;
+    sellUsd: number;
+    symbols: string[];
+  }> {
+    const query = new URLSearchParams();
+    query.set("endTime", String(Math.round(endTime)));
+    const clean = symbols
+      .map((s) => s.trim().toUpperCase())
+      .filter((s) => /^[A-Z0-9]{5,20}$/.test(s))
+      .slice(0, 24);
+    if (clean.length) query.set("symbols", clean.join(","));
+    const response = await fetch(`/api/futures/trades-window?${query.toString()}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMsg = "Failed to fetch trade window";
       try {
         const errorJson = JSON.parse(errorText);
         errorMsg = errorJson.error || errorJson.msg || errorMsg;

@@ -1288,6 +1288,116 @@ async function startServer() {
     };
   }
 
+  apiRouter.get("/futures/trades-window", async (req, res) => {
+    try {
+      const now = Date.now();
+      let endTime = Number(req.query.endTime);
+      if (!Number.isFinite(endTime) || endTime <= 0) endTime = now;
+      if (endTime > now + 60_000) endTime = now;
+      const startTime = endTime - 24 * 60 * 60 * 1000;
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const symbols = new Set<string>();
+      const extra = String(req.query.symbols || "")
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => /^[A-Z0-9]{5,20}$/.test(s));
+      for (const s of extra) symbols.add(s);
+      try {
+        const positions = await binanceRequest("/fapi/v2/positionRisk");
+        if (Array.isArray(positions)) {
+          for (const p of positions) {
+            if (Math.abs(parseFloat(p?.positionAmt || "0")) > 0 && p?.symbol) {
+              symbols.add(String(p.symbol).toUpperCase());
+            }
+          }
+        }
+      } catch (e: any) {
+        console.warn("[trades-window] positions failed:", e?.message || e);
+      }
+      for (const incomeType of ["REALIZED_PNL", "COMMISSION"]) {
+        try {
+          const rows = await binanceRequest("/fapi/v1/income", "GET", {
+            incomeType,
+            startTime: String(startTime),
+            endTime: String(endTime),
+            limit: "1000",
+          });
+          if (Array.isArray(rows)) {
+            for (const row of rows) {
+              if (row?.symbol) symbols.add(String(row.symbol).toUpperCase());
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[trades-window] income ${incomeType} failed:`, e?.message || e);
+        }
+      }
+      const symbolList = Array.from(symbols).slice(0, 24);
+      const trades: Array<{
+        symbol: string;
+        id: number;
+        orderId: number;
+        side: "BUY" | "SELL";
+        price: number;
+        qty: number;
+        quoteQty: number;
+        time: number;
+        realizedPnl: number;
+      }> = [];
+      const seen = new Set<string>();
+      for (let i = 0; i < symbolList.length; i++) {
+        const symbol = symbolList[i];
+        try {
+          const raw = await binanceRequest("/fapi/v1/userTrades", "GET", {
+            symbol,
+            startTime: String(startTime),
+            endTime: String(endTime),
+            limit: "1000",
+          });
+          const list = Array.isArray(raw) ? raw : [];
+          for (const t of list) {
+            const time = Number(t.time) || 0;
+            if (time < startTime || time > endTime) continue;
+            const id = Number(t.id) || 0;
+            const key = `${symbol}:${id}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const price = parseFloat(t.price || "0") || 0;
+            const qty = parseFloat(t.qty || "0") || 0;
+            trades.push({
+              symbol: String(t.symbol || symbol),
+              id,
+              orderId: Number(t.orderId) || 0,
+              side: String(t.side || "").toUpperCase() === "SELL" ? "SELL" : "BUY",
+              price,
+              qty,
+              quoteQty: parseFloat(t.quoteQty || "") || price * qty,
+              time,
+              realizedPnl: parseFloat(t.realizedPnl || "0") || 0,
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[trades-window] ${symbol} failed:`, e?.message || e);
+          if (e?.status === 429 && !e?.selfThrottled) break;
+        }
+        if (i < symbolList.length - 1) await sleep(200);
+      }
+      trades.sort((a, b) => b.time - a.time);
+      const buyUsd = trades.filter((t) => t.side === "BUY").reduce((s, t) => s + t.quoteQty, 0);
+      const sellUsd = trades.filter((t) => t.side === "SELL").reduce((s, t) => s + t.quoteQty, 0);
+      res.json({
+        startTime,
+        endTime,
+        trades,
+        count: trades.length,
+        buyUsd,
+        sellUsd,
+        symbols: symbolList,
+      });
+    } catch (err: any) {
+      sendApiError(res, err);
+    }
+  });
+
   apiRouter.get("/futures/trades-24h", async (req, res) => {
     try {
       const force = String(req.query.refresh || "") === "1";
